@@ -1,0 +1,12 @@
+node_modules/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+apps/api/data/
+apps/api/models/
+.turbo/
+dist/
+build/
+.next/
