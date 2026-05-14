@@ -85,10 +85,18 @@ export default function App() {
   const [results, setResults] = useState({});
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(true);
+const [dbStats, setDbStats] = useState(null);
 
   useEffect(() => {
     const fetchAll = async () => {
       const res = {};
+      // Fetch live stats from PostgreSQL
+      try {
+        const { data: statsData } = await axios.get("http://127.0.0.1:8000/stats");
+setDbStats(statsData);
+      } catch (e) {
+        console.log("Stats fetch failed");
+      }
       for (const b of borrowers) {
         try {
           const { data } = await axios.post("http://127.0.0.1:8000/predict", b);
@@ -139,7 +147,7 @@ export default function App() {
           </div>
           <div className="stat-card">
             <div className="stat-label">High Risk</div>
-            <div className="stat-value" style={{ color: "#e74c3c" }}>{loading ? "--" : highCount}</div>
+            <div className="stat-value" style={{ color: "#e74c3c" }}>{dbStats ? dbStats.high : highCount}</div>
             <div className="stat-sub">Needs attention</div>
           </div>
           <div className="stat-card">
