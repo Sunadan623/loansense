@@ -16,6 +16,18 @@ explainer = joblib.load(os.path.join(BASE_DIR, "models/shap_explainer.joblib"))
 with open(os.path.join(BASE_DIR, "models/feature_names.txt")) as f:
     feature_names = [line.strip() for line in f.readlines()]
 
+# Load DeepSurv
+try:
+    cph = joblib.load(os.path.join(BASE_DIR, "models/deepsurv_v1.joblib"))
+    SURVIVAL_FEATURES = ['int_rate', 'dti', 'fico_avg', 'loan_to_income',
+                         'grade', 'annual_inc', 'revol_util', 'emp_length',
+                         'open_acc', 'installment_to_income']
+    DEEPSURV_LOADED = True
+    print("DeepSurv loaded!")
+except Exception as e:
+    DEEPSURV_LOADED = False
+    print("DeepSurv not loaded:", e)
+
 POSTGRES_URL = os.getenv("POSTGRES_URL", "postgresql://loansense:loansense123@localhost:5433/loansense_db")
 engine = create_engine(POSTGRES_URL)
 Base = declarative_base()
@@ -59,7 +71,8 @@ def root():
     return {
         "status": "LoanSense API is running",
         "postgres": "connected",
-        "mongodb": "connected" if MONGO_CONNECTED else "disconnected"
+        "mongodb": "connected" if MONGO_CONNECTED else "disconnected",
+        "deepsurv": "loaded" if DEEPSURV_LOADED else "not loaded"
     }
 
 @app.post("/predict")
@@ -90,6 +103,23 @@ def predict(data: dict):
             "impact": "increases risk" if shap_series[feat] > 0 else "decreases risk",
             "shap_value": round(float(shap_series[feat]), 4)
         })
+
+    # DeepSurv survival prediction
+    risk_at_36mo = None
+    days_to_default = None
+    if DEEPSURV_LOADED:
+        try:
+            surv_input = pd.DataFrame([data])
+            for col in SURVIVAL_FEATURES:
+                if col not in surv_input.columns:
+                    surv_input[col] = 0
+            surv_input = surv_input[SURVIVAL_FEATURES]
+            risk_at_36mo = float(1 - cph.predict_survival_function(
+                surv_input, times=[36]).values[0][0])
+            median_surv = float(cph.predict_median(surv_input))
+            days_to_default = int(median_surv * 30) if median_surv != float('inf') else None
+        except Exception:
+            pass
 
     try:
         session = Session()
@@ -125,6 +155,10 @@ def predict(data: dict):
         "risk_score": round(risk_score, 4),
         "risk_level": level,
         "reasons": reasons,
+        "survival": {
+            "risk_at_36mo": round(risk_at_36mo, 4) if risk_at_36mo else None,
+            "days_to_default": days_to_default
+        },
         "saved_to_postgres": pred_id is not None,
         "saved_to_mongo": MONGO_CONNECTED
     }
