@@ -240,6 +240,28 @@ setDbStats(statsData);
               </div>
               <div>
                 <div className="detail-name">Why is {selectedBorrower.name} flagged?</div>
+                <div style={{display:"flex", gap:6, flexWrap:"wrap", marginTop:6}}>
+  {selectedResult.survival?.days_to_default && (
+    <div style={{
+      display:"inline-flex", alignItems:"center", gap:6,
+      background:"#fff3cd", color:"#856404",
+      padding:"4px 10px", borderRadius:20,
+      fontSize:12, fontWeight:600
+    }}>
+      ⏱ Default in ~{Math.round(selectedResult.survival.days_to_default / 30)} months
+    </div>
+  )}
+  {selectedResult.survival?.risk_at_36mo && (
+    <div style={{
+      display:"inline-flex", alignItems:"center", gap:6,
+      background:"#fde8e8", color:"#c0392b",
+      padding:"4px 10px", borderRadius:20,
+      fontSize:12, fontWeight:600
+    }}>
+      📊 36mo risk: {(selectedResult.survival.risk_at_36mo * 100).toFixed(1)}%
+    </div>
+  )}
+</div>
                 <div className="detail-meta">
                   Risk score: {Math.round(selectedResult.risk_score * 100)}% ·
                   Loan ₹{selectedBorrower.loan_amnt.toLocaleString()} ·
