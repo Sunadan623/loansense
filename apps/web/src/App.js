@@ -79,21 +79,28 @@ const styles = `
   .loading-row td { text-align: center; padding: 40px; color: #8892a4; font-size: 14px; }
   .pulse { animation: pulse 1.5s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .ai-card { padding: 14px; margin-bottom: 10px; border-radius: 10px; background: #fafbfc; border: 1px solid #eaedf3; transition: all 0.2s; }
+  .ai-card:hover { border-color: #d0d5e0; }
+  .ai-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .ai-card-title { font-weight: 600; font-size: 14px; color: #1a1a2e; display: flex; align-items: center; gap: 8px; }
+  .ai-card-details { font-size: 13px; color: #5a6378; line-height: 1.5; }
+  .priority-badge { padding: 3px 9px; border-radius: 20px; font-size: 11px; font-weight: 600; }
 `;
 
 export default function App() {
   const [results, setResults] = useState({});
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(true);
-const [dbStats, setDbStats] = useState(null);
+  const [dbStats, setDbStats] = useState(null);
+  const [recommendations, setRecommendations] = useState(null);
+  const [loadingRec, setLoadingRec] = useState(false);
 
   useEffect(() => {
     const fetchAll = async () => {
       const res = {};
-      // Fetch live stats from PostgreSQL
       try {
         const { data: statsData } = await axios.get("http://127.0.0.1:8000/stats");
-setDbStats(statsData);
+        setDbStats(statsData);
       } catch (e) {
         console.log("Stats fetch failed");
       }
@@ -110,6 +117,30 @@ setDbStats(statsData);
     };
     fetchAll();
   }, []);
+
+  const handleSelect = async (b) => {
+    const newSel = selected === b.id ? null : b.id;
+    setSelected(newSel);
+    setRecommendations(null);
+    if (newSel) {
+      setLoadingRec(true);
+      try {
+        const { data } = await axios.post("http://127.0.0.1:8000/recommend", {
+          name: b.name,
+          risk_score: results[b.id]?.risk_score || 0,
+          risk_level: results[b.id]?.risk_level || "UNKNOWN",
+          int_rate: b.int_rate,
+          dti: b.dti,
+          loan_amnt: b.loan_amnt,
+          days_to_default: results[b.id]?.survival?.days_to_default
+        });
+        setRecommendations(data);
+      } catch (e) {
+        setRecommendations({ error: "Failed to load recommendations" });
+      }
+      setLoadingRec(false);
+    }
+  };
 
   const highCount = Object.values(results).filter(r => r.risk_level === "HIGH").length;
   const medCount = Object.values(results).filter(r => r.risk_level === "MEDIUM").length;
@@ -193,7 +224,7 @@ setDbStats(statsData);
                 const score = r ? Math.round(r.risk_score * 100) : 0;
                 return (
                   <tr key={b.id} className={selected === b.id ? "active" : ""}
-                    onClick={() => setSelected(selected === b.id ? null : b.id)}>
+                    onClick={() => handleSelect(b)}>
                     <td>
                       <div className="borrower-cell">
                         <div className="avatar" style={{ background: colors.avatarBg, color: colors.avatarText }}>
@@ -238,31 +269,31 @@ setDbStats(statsData);
                 style={{ background: RISK[selectedResult.risk_level].avatarBg, color: RISK[selectedResult.risk_level].avatarText }}>
                 {selectedBorrower.initials}
               </div>
-              <div>
+              <div style={{flex: 1}}>
                 <div className="detail-name">Why is {selectedBorrower.name} flagged?</div>
                 <div style={{display:"flex", gap:6, flexWrap:"wrap", marginTop:6}}>
-  {selectedResult.survival?.days_to_default && (
-    <div style={{
-      display:"inline-flex", alignItems:"center", gap:6,
-      background:"#fff3cd", color:"#856404",
-      padding:"4px 10px", borderRadius:20,
-      fontSize:12, fontWeight:600
-    }}>
-      ⏱ Default in ~{Math.round(selectedResult.survival.days_to_default / 30)} months
-    </div>
-  )}
-  {selectedResult.survival?.risk_at_36mo && (
-    <div style={{
-      display:"inline-flex", alignItems:"center", gap:6,
-      background:"#fde8e8", color:"#c0392b",
-      padding:"4px 10px", borderRadius:20,
-      fontSize:12, fontWeight:600
-    }}>
-      📊 36mo risk: {(selectedResult.survival.risk_at_36mo * 100).toFixed(1)}%
-    </div>
-  )}
-</div>
-                <div className="detail-meta">
+                  {selectedResult.survival?.days_to_default && (
+                    <div style={{
+                      display:"inline-flex", alignItems:"center", gap:6,
+                      background:"#fff3cd", color:"#856404",
+                      padding:"4px 10px", borderRadius:20,
+                      fontSize:12, fontWeight:600
+                    }}>
+                      ⏱ Default in ~{Math.round(selectedResult.survival.days_to_default / 30)} months
+                    </div>
+                  )}
+                  {selectedResult.survival?.risk_at_36mo && (
+                    <div style={{
+                      display:"inline-flex", alignItems:"center", gap:6,
+                      background:"#fde8e8", color:"#c0392b",
+                      padding:"4px 10px", borderRadius:20,
+                      fontSize:12, fontWeight:600
+                    }}>
+                      📊 36mo risk: {(selectedResult.survival.risk_at_36mo * 100).toFixed(1)}%
+                    </div>
+                  )}
+                </div>
+                <div className="detail-meta" style={{marginTop: 8}}>
                   Risk score: {Math.round(selectedResult.risk_score * 100)}% ·
                   Loan ₹{selectedBorrower.loan_amnt.toLocaleString()} ·
                   {selectedResult.risk_level} RISK
@@ -299,6 +330,40 @@ setDbStats(statsData);
                   </div>
                 );
               })}
+
+              {(loadingRec || recommendations) && (
+                <div style={{marginTop: 24, paddingTop: 20, borderTop: "1px solid #f0f2f7"}}>
+                  <div className="detail-section-title">
+                    🤖 AI Recovery Recommendations
+                  </div>
+                  {loadingRec && (
+                    <p style={{color: "#8892a4", fontSize: 13}} className="pulse">
+                      Generating AI recommendations...
+                    </p>
+                  )}
+                  {recommendations?.actions?.map((a, i) => {
+                    const colors = a.priority === "HIGH" ? {bg:"#fde8e8", text:"#c0392b"}
+                                 : a.priority === "MEDIUM" ? {bg:"#fef3d0", text:"#b7770d"}
+                                 : {bg:"#d4f5e2", text:"#1a7a3c"};
+                    return (
+                      <div key={i} className="ai-card">
+                        <div className="ai-card-header">
+                          <div className="ai-card-title">{a.action}</div>
+                          <span className="priority-badge" style={{background: colors.bg, color: colors.text}}>
+                            {a.priority}
+                          </span>
+                        </div>
+                        <div className="ai-card-details">{a.details}</div>
+                      </div>
+                    );
+                  })}
+                  {recommendations?.error && (
+                    <p style={{color: "#c0392b", fontSize: 13}}>
+                      {recommendations.error}
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}
