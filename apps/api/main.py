@@ -59,9 +59,13 @@ class Loan(Base):
     dti = Column(Float)
     fico_avg = Column(Integer)
     emp_length = Column(Integer)
+    purpose = Column(String, default="personal")  # personal, home, car, education, business, medical
     risk_score = Column(Float, default=0)
     risk_level = Column(String, default="UNKNOWN")
-    status = Column(String, default="active")
+    status = Column(String, default="pending")  # pending, approved, rejected, disbursed, active, paid, defaulted
+    rejection_reason = Column(String, nullable=True)
+    reviewed_by = Column(Integer, nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     user = relationship("User")
 
@@ -378,10 +382,11 @@ def get_me(current_user: dict = Depends(get_current_user)):
 @app.get("/my-loans")
 def get_my_loans(current_user: dict = Depends(get_current_user)):
     session = Session()
-    loans = session.query(Loan).filter(Loan.user_id == current_user["user_id"]).all()
+    loans = session.query(Loan).filter(Loan.user_id == current_user["user_id"]).order_by(Loan.created_at.desc()).all()
     result = [
         {
             "id": l.id,
+            "purpose": l.purpose,
             "loan_amnt": l.loan_amnt,
             "term": l.term,
             "int_rate": l.int_rate,
@@ -389,9 +394,212 @@ def get_my_loans(current_user: dict = Depends(get_current_user)):
             "risk_score": l.risk_score,
             "risk_level": l.risk_level,
             "status": l.status,
+            "rejection_reason": l.rejection_reason,
+            "reviewed_at": str(l.reviewed_at) if l.reviewed_at else None,
             "created_at": str(l.created_at)
         }
         for l in loans
     ]
     session.close()
     return result
+
+
+# Loan type configurations
+LOAN_TYPES = {
+    "personal": {"min": 10000, "max": 500000, "rate_range": (10, 18), "max_tenure": 60, "risk_multiplier": 1.0},
+    "home": {"min": 500000, "max": 10000000, "rate_range": (7, 11), "max_tenure": 240, "risk_multiplier": 0.7},
+    "car": {"min": 100000, "max": 2000000, "rate_range": (8, 14), "max_tenure": 84, "risk_multiplier": 0.85},
+    "education": {"min": 50000, "max": 2000000, "rate_range": (8, 13), "max_tenure": 120, "risk_multiplier": 0.9},
+    "business": {"min": 100000, "max": 5000000, "rate_range": (11, 20), "max_tenure": 84, "risk_multiplier": 1.2},
+    "medical": {"min": 25000, "max": 1500000, "rate_range": (10, 16), "max_tenure": 60, "risk_multiplier": 0.95},
+}
+
+
+@app.get("/loan-types")
+def get_loan_types():
+    return LOAN_TYPES
+
+
+@app.post("/apply-loan")
+def apply_loan(data: dict, current_user: dict = Depends(get_current_user)):
+    """Borrower submits loan application — goes to PENDING status awaiting bank approval"""
+    try:
+        purpose = data.get("purpose", "personal")
+        if purpose not in LOAN_TYPES:
+            return {"error": "Invalid loan purpose"}
+
+        loan_amnt = float(data.get("loan_amnt", 0))
+        term = int(data.get("term", 36))
+        int_rate = float(data.get("int_rate", 12.0))
+
+        # Validate against loan type limits
+        cfg = LOAN_TYPES[purpose]
+        if loan_amnt < cfg["min"] or loan_amnt > cfg["max"]:
+            return {"error": f"Loan amount for {purpose} loans must be between ₹{cfg['min']:,} and ₹{cfg['max']:,}"}
+        if term > cfg["max_tenure"]:
+            return {"error": f"Maximum tenure for {purpose} loans is {cfg['max_tenure']} months"}
+
+        # Calculate EMI properly: P*r*(1+r)^n / ((1+r)^n - 1)
+        r = int_rate / 100 / 12
+        n = term
+        emi = (loan_amnt * r * (1 + r) ** n) / ((1 + r) ** n - 1) if r > 0 else loan_amnt / n
+
+        loan_features = {
+            "loan_amnt": loan_amnt,
+            "term": term,
+            "int_rate": int_rate,
+            "installment": emi,
+            "grade": int(data.get("grade", 3)),
+            "emp_length": int(data.get("emp_length", 1)),
+            "annual_inc": float(data.get("annual_inc", 50000)),
+            "dti": float(data.get("dti", 15)),
+            "fico_range_low": int(data.get("fico_avg", 700)) - 2,
+            "fico_range_high": int(data.get("fico_avg", 700)) + 2,
+            "fico_avg": int(data.get("fico_avg", 700)),
+        }
+
+        # Get base risk from XGBoost
+        df = pd.DataFrame([loan_features])
+        for col in feature_names:
+            if col not in df.columns:
+                df[col] = 0
+        df = df[feature_names]
+        base_risk = float(model.predict_proba(df)[:, 1][0])
+
+        # Adjust risk by loan type
+        adjusted_risk = min(base_risk * cfg["risk_multiplier"], 1.0)
+        risk_level = "HIGH" if adjusted_risk >= 0.6 else "MEDIUM" if adjusted_risk >= 0.3 else "LOW"
+
+        # Save with status = pending (awaiting bank approval)
+        session = Session()
+        loan = Loan(
+            user_id=current_user["user_id"],
+            loan_amnt=loan_amnt,
+            term=term,
+            int_rate=int_rate,
+            installment=round(emi, 2),
+            grade=loan_features["grade"],
+            annual_inc=loan_features["annual_inc"],
+            dti=loan_features["dti"],
+            fico_avg=loan_features["fico_avg"],
+            emp_length=loan_features["emp_length"],
+            purpose=purpose,
+            risk_score=adjusted_risk,
+            risk_level=risk_level,
+            status="pending"
+        )
+        session.add(loan)
+        session.commit()
+        session.refresh(loan)
+        loan_id = loan.id
+        session.close()
+
+        return {
+            "success": True,
+            "loan_id": loan_id,
+            "purpose": purpose,
+            "risk_score": round(adjusted_risk, 4),
+            "risk_level": risk_level,
+            "installment": round(emi, 2),
+            "status": "pending",
+            "message": "Application submitted! Awaiting bank approval."
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/pending-applications")
+def get_pending_applications(current_user: dict = Depends(get_current_user)):
+    """For analysts — list all pending loan applications"""
+    if current_user.get("role") != "analyst":
+        return {"error": "Only analysts can view pending applications"}
+
+    session = Session()
+    loans = session.query(Loan).filter(Loan.status == "pending").all()
+    result = []
+    for l in loans:
+        user = session.query(User).filter(User.id == l.user_id).first()
+        result.append({
+            "id": l.id,
+            "borrower_name": user.name if user else "Unknown",
+            "borrower_email": user.email if user else "",
+            "purpose": l.purpose,
+            "loan_amnt": l.loan_amnt,
+            "term": l.term,
+            "int_rate": l.int_rate,
+            "installment": l.installment,
+            "risk_score": round(l.risk_score, 4),
+            "risk_level": l.risk_level,
+            "annual_inc": l.annual_inc,
+            "dti": l.dti,
+            "fico_avg": l.fico_avg,
+            "created_at": str(l.created_at)
+        })
+    session.close()
+    return result
+
+
+@app.post("/approve-loan/{loan_id}")
+def approve_loan(loan_id: int, current_user: dict = Depends(get_current_user)):
+    """Analyst approves a pending loan"""
+    if current_user.get("role") != "analyst":
+        return {"error": "Only analysts can approve loans"}
+
+    session = Session()
+    loan = session.query(Loan).filter(Loan.id == loan_id).first()
+    if not loan:
+        session.close()
+        return {"error": "Loan not found"}
+    if loan.status != "pending":
+        session.close()
+        return {"error": f"Loan is already {loan.status}"}
+
+    loan.status = "approved"
+    loan.reviewed_by = current_user["user_id"]
+    loan.reviewed_at = datetime.utcnow()
+    session.commit()
+    session.close()
+    return {"success": True, "message": "Loan approved", "loan_id": loan_id}
+
+
+@app.post("/reject-loan/{loan_id}")
+def reject_loan(loan_id: int, data: dict, current_user: dict = Depends(get_current_user)):
+    """Analyst rejects a pending loan with a reason"""
+    if current_user.get("role") != "analyst":
+        return {"error": "Only analysts can reject loans"}
+
+    reason = data.get("reason", "Application did not meet criteria")
+    session = Session()
+    loan = session.query(Loan).filter(Loan.id == loan_id).first()
+    if not loan:
+        session.close()
+        return {"error": "Loan not found"}
+
+    loan.status = "rejected"
+    loan.rejection_reason = reason
+    loan.reviewed_by = current_user["user_id"]
+    loan.reviewed_at = datetime.utcnow()
+    session.commit()
+    session.close()
+    return {"success": True, "message": "Loan rejected", "loan_id": loan_id}
+
+
+@app.post("/disburse-loan/{loan_id}")
+def disburse_loan(loan_id: int, current_user: dict = Depends(get_current_user)):
+    """Analyst marks an approved loan as disbursed (money sent to borrower)"""
+    if current_user.get("role") != "analyst":
+        return {"error": "Only analysts can disburse loans"}
+
+    session = Session()
+    loan = session.query(Loan).filter(Loan.id == loan_id).first()
+    if not loan:
+        session.close()
+        return {"error": "Loan not found"}
+    if loan.status != "approved":
+        session.close()
+        return {"error": "Loan must be approved before disbursement"}
+
+    loan.status = "active"
+    session.commit()
+    session.close()
+    return {"success": True, "message": "Loan disbursed", "loan_id": loan_id}

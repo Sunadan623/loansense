@@ -94,6 +94,8 @@ export default function App() {
   const [dbStats, setDbStats] = useState(null);
   const [recommendations, setRecommendations] = useState(null);
   const [loadingRec, setLoadingRec] = useState(false);
+  const [pendingApps, setPendingApps] = useState([]);
+  const [actionLoading, setActionLoading] = useState(null);
 
   useEffect(() => {
     const fetchAll = async () => {
@@ -103,6 +105,16 @@ export default function App() {
         setDbStats(statsData);
       } catch (e) {
         console.log("Stats fetch failed");
+      }
+      // Fetch pending loan applications
+      try {
+        const token = localStorage.getItem("token");
+        const { data: pending } = await axios.get("http://127.0.0.1:8000/pending-applications", {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (Array.isArray(pending)) setPendingApps(pending);
+      } catch (e) {
+        console.log("Pending fetch failed");
       }
       for (const b of borrowers) {
         try {
@@ -141,7 +153,36 @@ export default function App() {
       setLoadingRec(false);
     }
   };
+  const handleApprove = async (loanId) => {
+    setActionLoading(loanId);
+    try {
+      const token = localStorage.getItem("token");
+      await axios.post(`http://127.0.0.1:8000/approve-loan/${loanId}`, {}, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setPendingApps(pendingApps.filter(p => p.id !== loanId));
+    } catch (e) {
+      alert("Approval failed");
+    }
+    setActionLoading(null);
+  };
 
+  const handleReject = async (loanId) => {
+    const reason = prompt("Reason for rejection:", "Application did not meet criteria");
+    if (!reason) return;
+    setActionLoading(loanId);
+    try {
+      const token = localStorage.getItem("token");
+      await axios.post(`http://127.0.0.1:8000/reject-loan/${loanId}`,
+        { reason },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setPendingApps(pendingApps.filter(p => p.id !== loanId));
+    } catch (e) {
+      alert("Rejection failed");
+    }
+    setActionLoading(null);
+  };
   const highCount = Object.values(results).filter(r => r.risk_level === "HIGH").length;
   const medCount = Object.values(results).filter(r => r.risk_level === "MEDIUM").length;
   const avgScore = Object.values(results).length
@@ -192,7 +233,52 @@ export default function App() {
             <div className="stat-sub">Portfolio average</div>
           </div>
         </div>
-
+        {pendingApps.length > 0 && (
+  <div className="table-card" style={{marginBottom: 20}}>
+    <div className="table-header">
+      <span className="table-title">⏳ Pending Loan Applications</span>
+      <span className="table-count" style={{background:"#fff3cd", color:"#856404"}}>{pendingApps.length} awaiting review</span>
+    </div>
+    <div style={{padding: "0"}}>
+      {pendingApps.map(p => {
+        const colors = p.risk_level === "HIGH" ? {bg:"#fff0f0", text:"#c0392b", dot:"#e74c3c"}
+                     : p.risk_level === "MEDIUM" ? {bg:"#fffbf0", text:"#b7770d", dot:"#f39c12"}
+                     : {bg:"#f0fff4", text:"#1a7a3c", dot:"#27ae60"};
+        const purposeIcons = {personal:"👤", home:"🏠", car:"🚗", education:"🎓", business:"💼", medical:"🏥"};
+        return (
+          <div key={p.id} style={{
+            display:"flex", alignItems:"center", padding:"18px 24px",
+            borderBottom: "1px solid #f0f2f7", gap: 16
+          }}>
+            <div style={{fontSize: 28}}>{purposeIcons[p.purpose] || "💰"}</div>
+            <div style={{flex: 1}}>
+              <div style={{fontSize: 15, fontWeight: 600, color:"#1a1a2e"}}>
+                {p.borrower_name} <span style={{fontWeight: 400, color:"#8892a4"}}>· {p.borrower_email}</span>
+              </div>
+              <div style={{fontSize: 12, color:"#8892a4", marginTop: 2, fontFamily:"DM Mono, monospace"}}>
+                {p.purpose?.toUpperCase()} · ₹{p.loan_amnt.toLocaleString()} · {p.term}mo · {p.int_rate}% · DTI {p.dti}
+              </div>
+            </div>
+            <span className="risk-badge" style={{background: colors.bg, color: colors.text}}>
+              <span className="risk-dot" style={{background: colors.dot}} />
+              {p.risk_level} · {Math.round(p.risk_score * 100)}%
+            </span>
+            <button onClick={() => handleReject(p.id)} disabled={actionLoading === p.id}
+              style={{padding:"8px 16px", background:"#fff", color:"#c0392b", border:"1px solid #f5c6cb",
+                      borderRadius: 8, fontSize: 13, fontWeight: 600, cursor:"pointer", fontFamily:"inherit"}}>
+              Reject
+            </button>
+            <button onClick={() => handleApprove(p.id)} disabled={actionLoading === p.id}
+              style={{padding:"8px 16px", background:"#1a7a3c", color:"#fff", border:"none",
+                      borderRadius: 8, fontSize: 13, fontWeight: 600, cursor:"pointer", fontFamily:"inherit"}}>
+              {actionLoading === p.id ? "..." : "Approve"}
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  </div>
+)}
         <div className="table-card">
           <div className="table-header">
             <span className="table-title">Borrower Risk Overview</span>
