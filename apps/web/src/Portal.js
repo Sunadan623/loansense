@@ -56,8 +56,73 @@ export default function Portal() {
   const [user, setUser] = useState(null);
   const [loans, setLoans] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [paying, setPaying] = useState(null);
   const navigate = useNavigate();
+  const handlePayEMI = async (loan) => {
+    setPaying(loan.id);
+    try {
+      const token = localStorage.getItem("token");
+      // Step 1: Create Razorpay order on backend
+      const { data: orderData } = await axios.post(
+        `http://127.0.0.1:8000/create-payment-order/${loan.id}`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
 
+      if (orderData.error) {
+        alert("Failed to create payment: " + orderData.error);
+        setPaying(null);
+        return;
+      }
+
+      // Step 2: Open Razorpay checkout
+      const options = {
+        key: orderData.key_id,
+        amount: orderData.amount,
+        currency: orderData.currency,
+        name: "LoanSense",
+        description: `EMI for ${orderData.loan_purpose} loan`,
+        order_id: orderData.order_id,
+        handler: async (response) => {
+          // Step 3: Verify payment on backend
+          try {
+            const { data: verifyData } = await axios.post(
+              "http://127.0.0.1:8000/verify-payment",
+              {
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature
+              },
+              { headers: { Authorization: `Bearer ${token}` } }
+            );
+
+            if (verifyData.success) {
+              alert("✓ Payment successful! ₹" + Math.round(orderData.emi_amount).toLocaleString() + " paid.");
+            } else {
+              alert("Payment verification failed: " + verifyData.error);
+            }
+          } catch (e) {
+            alert("Verification error");
+          }
+          setPaying(null);
+        },
+        prefill: {
+          name: user.name,
+          email: user.email,
+        },
+        theme: { color: "#1a1a2e" },
+        modal: {
+          ondismiss: () => setPaying(null)
+        }
+      };
+
+      const rzp = new window.Razorpay(options);
+      rzp.open();
+    } catch (e) {
+      alert("Payment failed: " + e.message);
+      setPaying(null);
+    }
+  };
   useEffect(() => {
     const token = localStorage.getItem("token");
     const storedUser = localStorage.getItem("user");
@@ -201,7 +266,9 @@ export default function Portal() {
                       <>
                         <button className="btn-secondary">View details</button>
                         <button className="btn-secondary">Request deferral</button>
-                        <button className="btn-pay">Pay EMI</button>
+                        <button className="btn-pay" onClick={() => handlePayEMI(l)} disabled={paying === l.id}>
+                            {paying === l.id ? "Processing..." : "Pay EMI"}
+                        </button>
                       </>
                     )}
                     {l.status === "paid" && (

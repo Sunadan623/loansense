@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, 
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from pymongo import MongoClient
 from apps.api.auth import hash_password, verify_password, create_access_token, get_current_user
+import razorpay
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 model = joblib.load(os.path.join(BASE_DIR, "models/xgboost_v1.joblib"))
 explainer = joblib.load(os.path.join(BASE_DIR, "models/shap_explainer.joblib"))
@@ -81,7 +82,18 @@ class Prediction(Base):
     dti = Column(Float)
     fico_avg = Column(Float)
     created_at = Column(DateTime, default=datetime.utcnow)
-
+class Payment(Base):
+    __tablename__ = "payments"
+    id = Column(Integer, primary_key=True, index=True)
+    loan_id = Column(Integer, ForeignKey("loans.id"))
+    user_id = Column(Integer, ForeignKey("users.id"))
+    amount = Column(Float)
+    razorpay_order_id = Column(String, nullable=True)
+    razorpay_payment_id = Column(String, nullable=True)
+    razorpay_signature = Column(String, nullable=True)
+    status = Column(String, default="created")  # created, paid, failed
+    created_at = Column(DateTime, default=datetime.utcnow)
+    paid_at = Column(DateTime, nullable=True)
 
 Base.metadata.create_all(bind=engine)
 
@@ -240,7 +252,9 @@ def get_stats():
 
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "")
+razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)) if RAZORPAY_KEY_ID else None
 
 @app.post("/recommend")
 async def recommend(data: dict):
@@ -659,3 +673,139 @@ def disburse_loan(loan_id: int, current_user: dict = Depends(get_current_user)):
     session.commit()
     session.close()
     return {"success": True, "message": "Loan disbursed", "loan_id": loan_id}
+# ============== PAYMENT ENDPOINTS ==============
+
+@app.post("/create-payment-order/{loan_id}")
+def create_payment_order(loan_id: int, current_user: dict = Depends(get_current_user)):
+    """Create a Razorpay order for EMI payment"""
+    if not razorpay_client:
+        return {"error": "Razorpay not configured"}
+
+    session = Session()
+    try:
+        loan = session.query(Loan).filter(
+            Loan.id == loan_id,
+            Loan.user_id == current_user["user_id"]
+        ).first()
+
+        if not loan:
+            session.close()
+            return {"error": "Loan not found"}
+        if loan.status != "active":
+            session.close()
+            return {"error": "Loan is not active"}
+
+        # Cache loan details BEFORE closing session
+        installment = float(loan.installment)
+        purpose = loan.purpose
+        amount_paise = int(installment * 100)
+
+        # Create Razorpay order
+        order_data = {
+            "amount": amount_paise,
+            "currency": "INR",
+            "receipt": f"loan_{loan_id}_emi_{int(datetime.utcnow().timestamp())}",
+            "notes": {
+                "loan_id": str(loan_id),
+                "user_id": str(current_user["user_id"]),
+                "purpose": purpose
+            }
+        }
+        order = razorpay_client.order.create(data=order_data)
+
+        # Save payment record
+        payment = Payment(
+            loan_id=loan_id,
+            user_id=current_user["user_id"],
+            amount=installment,
+            razorpay_order_id=order["id"],
+            status="created"
+        )
+        session.add(payment)
+        session.commit()
+        payment_id = payment.id
+        session.close()
+
+        return {
+            "success": True,
+            "order_id": order["id"],
+            "amount": amount_paise,
+            "currency": "INR",
+            "key_id": RAZORPAY_KEY_ID,
+            "payment_id": payment_id,
+            "loan_purpose": purpose,
+            "emi_amount": installment
+        }
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
+
+@app.post("/verify-payment")
+def verify_payment(data: dict, current_user: dict = Depends(get_current_user)):
+    """Verify Razorpay payment after checkout success"""
+    if not razorpay_client:
+        return {"error": "Razorpay not configured"}
+
+    razorpay_order_id = data.get("razorpay_order_id")
+    razorpay_payment_id = data.get("razorpay_payment_id")
+    razorpay_signature = data.get("razorpay_signature")
+
+    if not all([razorpay_order_id, razorpay_payment_id, razorpay_signature]):
+        return {"error": "Missing payment details"}
+
+    session = Session()
+    try:
+        # Verify signature
+        razorpay_client.utility.verify_payment_signature({
+            "razorpay_order_id": razorpay_order_id,
+            "razorpay_payment_id": razorpay_payment_id,
+            "razorpay_signature": razorpay_signature
+        })
+
+        # Mark payment as paid
+        payment = session.query(Payment).filter(
+            Payment.razorpay_order_id == razorpay_order_id
+        ).first()
+        if not payment:
+            session.close()
+            return {"error": "Payment record not found"}
+
+        payment.razorpay_payment_id = razorpay_payment_id
+        payment.razorpay_signature = razorpay_signature
+        payment.status = "paid"
+        payment.paid_at = datetime.utcnow()
+        session.commit()
+        session.close()
+
+        return {"success": True, "message": "Payment verified successfully"}
+    except razorpay.errors.SignatureVerificationError:
+        session.close()
+        return {"error": "Invalid signature — payment verification failed"}
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
+
+@app.get("/payment-history/{loan_id}")
+def get_payment_history(loan_id: int, current_user: dict = Depends(get_current_user)):
+    """Get all payments for a loan"""
+    session = Session()
+    payments = session.query(Payment).filter(
+        Payment.loan_id == loan_id,
+        Payment.user_id == current_user["user_id"]
+    ).order_by(Payment.created_at.desc()).all()
+
+    result = [
+        {
+            "id": p.id,
+            "amount": p.amount,
+            "status": p.status,
+            "razorpay_payment_id": p.razorpay_payment_id,
+            "created_at": str(p.created_at),
+            "paid_at": str(p.paid_at) if p.paid_at else None
+        }
+        for p in payments
+    ]
+    session.close()
+    return result
