@@ -1,23 +1,12 @@
 import { useState, useEffect } from "react";
 import axios from "axios";
 
-const borrowers = [
-  { id: 1, name: "Rahul Sharma", initials: "RS", loan_amnt: 15000, term: 60, int_rate: 22.5, installment: 420, grade: 5, emp_length: 2, annual_inc: 45000, dti: 28, fico_range_low: 650, fico_range_high: 654, fico_avg: 652 },
-  { id: 2, name: "Priya Patel", initials: "PP", loan_amnt: 8000, term: 36, int_rate: 8.5, installment: 180, grade: 2, emp_length: 7, annual_inc: 85000, dti: 10, fico_range_low: 760, fico_range_high: 764, fico_avg: 762 },
-  { id: 3, name: "Amit Singh", initials: "AS", loan_amnt: 20000, term: 60, int_rate: 18.0, installment: 500, grade: 4, emp_length: 3, annual_inc: 55000, dti: 22, fico_range_low: 690, fico_range_high: 694, fico_avg: 692 },
-  { id: 4, name: "Neha Gupta", initials: "NG", loan_amnt: 5000, term: 36, int_rate: 6.5, installment: 110, grade: 1, emp_length: 10, annual_inc: 120000, dti: 7, fico_range_low: 800, fico_range_high: 804, fico_avg: 802 },
-  { id: 5, name: "Vikram Joshi", initials: "VJ", loan_amnt: 25000, term: 60, int_rate: 24.0, installment: 650, grade: 6, emp_length: 1, annual_inc: 40000, dti: 35, fico_range_low: 630, fico_range_high: 634, fico_avg: 632 },
-  { id: 6, name: "Ananya Mehta", initials: "AM", loan_amnt: 12000, term: 36, int_rate: 14.0, installment: 310, grade: 3, emp_length: 5, annual_inc: 70000, dti: 18, fico_range_low: 710, fico_range_high: 714, fico_avg: 712 },
-];
-
 const RISK = {
   HIGH:   { bg: "#fff0f0", text: "#c0392b", bar: "#e74c3c", dot: "#e74c3c", avatarBg: "#fde8e8", avatarText: "#c0392b" },
   MEDIUM: { bg: "#fffbf0", text: "#b7770d", bar: "#f39c12", dot: "#f39c12", avatarBg: "#fef3d0", avatarText: "#b7770d" },
   LOW:    { bg: "#f0fff4", text: "#1a7a3c", bar: "#27ae60", dot: "#27ae60", avatarBg: "#d4f5e2", avatarText: "#1a7a3c" },
   UNKNOWN:{ bg: "#f5f5f5", text: "#888",    bar: "#ccc",    dot: "#ccc",    avatarBg: "#eee",    avatarText: "#888" },
 };
-
-const gradeLabel = (g) => ["", "A", "B", "C", "D", "E", "F", "G"][g] || "?";
 
 const styles = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
@@ -96,6 +85,8 @@ export default function App() {
   const [loadingRec, setLoadingRec] = useState(false);
   const [pendingApps, setPendingApps] = useState([]);
   const [actionLoading, setActionLoading] = useState(null);
+  const [approvedApps, setApprovedApps] = useState([]);
+  const [activeLoans, setActiveLoans] = useState([]);
 
   useEffect(() => {
     const fetchAll = async () => {
@@ -103,27 +94,56 @@ export default function App() {
       try {
         const { data: statsData } = await axios.get("http://127.0.0.1:8000/stats");
         setDbStats(statsData);
-      } catch (e) {
-        console.log("Stats fetch failed");
-      }
-      // Fetch pending loan applications
+      } catch (e) { console.log("Stats fetch failed"); }
+
       try {
         const token = localStorage.getItem("token");
         const { data: pending } = await axios.get("http://127.0.0.1:8000/pending-applications", {
           headers: { Authorization: `Bearer ${token}` }
         });
         if (Array.isArray(pending)) setPendingApps(pending);
-      } catch (e) {
-        console.log("Pending fetch failed");
-      }
-      for (const b of borrowers) {
-        try {
-          const { data } = await axios.post("http://127.0.0.1:8000/predict", b);
-          res[b.id] = data;
-        } catch {
-          res[b.id] = { risk_score: 0, risk_level: "UNKNOWN", reasons: [] };
+      } catch (e) { console.log("Pending fetch failed"); }
+
+      try {
+        const token = localStorage.getItem("token");
+        const { data: approved } = await axios.get("http://127.0.0.1:8000/approved-applications", {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (Array.isArray(approved)) setApprovedApps(approved);
+      } catch (e) { console.log("Approved fetch failed"); }
+
+      try {
+        const token = localStorage.getItem("token");
+        const { data: active } = await axios.get("http://127.0.0.1:8000/active-loans", {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (Array.isArray(active)) {
+          setActiveLoans(active);
+          for (const loan of active) {
+            try {
+              const features = {
+                name: loan.borrower_name,
+                loan_amnt: loan.loan_amnt,
+                term: loan.term,
+                int_rate: loan.int_rate,
+                installment: loan.installment,
+                grade: loan.grade,
+                emp_length: loan.emp_length,
+                annual_inc: loan.annual_inc,
+                dti: loan.dti,
+                fico_range_low: loan.fico_avg - 2,
+                fico_range_high: loan.fico_avg + 2,
+                fico_avg: loan.fico_avg
+              };
+              const { data: pred } = await axios.post("http://127.0.0.1:8000/predict", features);
+              res[loan.id] = pred;
+            } catch {
+              res[loan.id] = { risk_score: loan.risk_score, risk_level: loan.risk_level, reasons: [] };
+            }
+          }
         }
-      }
+      } catch (e) { console.log("Active loans fetch failed"); }
+
       setResults(res);
       setLoading(false);
     };
@@ -138,7 +158,7 @@ export default function App() {
       setLoadingRec(true);
       try {
         const { data } = await axios.post("http://127.0.0.1:8000/recommend", {
-          name: b.name,
+          name: b.borrower_name || b.name,
           risk_score: results[b.id]?.risk_score || 0,
           risk_level: results[b.id]?.risk_level || "UNKNOWN",
           int_rate: b.int_rate,
@@ -153,6 +173,7 @@ export default function App() {
       setLoadingRec(false);
     }
   };
+
   const handleApprove = async (loanId) => {
     setActionLoading(loanId);
     try {
@@ -160,10 +181,10 @@ export default function App() {
       await axios.post(`http://127.0.0.1:8000/approve-loan/${loanId}`, {}, {
         headers: { Authorization: `Bearer ${token}` }
       });
+      const approvedItem = pendingApps.find(p => p.id === loanId);
       setPendingApps(pendingApps.filter(p => p.id !== loanId));
-    } catch (e) {
-      alert("Approval failed");
-    }
+      if (approvedItem) setApprovedApps([...approvedApps, approvedItem]);
+    } catch (e) { alert("Approval failed"); }
     setActionLoading(null);
   };
 
@@ -178,22 +199,37 @@ export default function App() {
         { headers: { Authorization: `Bearer ${token}` } }
       );
       setPendingApps(pendingApps.filter(p => p.id !== loanId));
-    } catch (e) {
-      alert("Rejection failed");
-    }
+    } catch (e) { alert("Rejection failed"); }
     setActionLoading(null);
   };
+
+  const handleDisburse = async (loanId) => {
+    setActionLoading(loanId);
+    try {
+      const token = localStorage.getItem("token");
+      await axios.post(`http://127.0.0.1:8000/disburse-loan/${loanId}`, {}, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const disbursed = approvedApps.find(p => p.id === loanId);
+      setApprovedApps(approvedApps.filter(p => p.id !== loanId));
+      if (disbursed) setActiveLoans([...activeLoans, disbursed]);
+    } catch (e) { alert("Disbursement failed"); }
+    setActionLoading(null);
+  };
+
   const highCount = Object.values(results).filter(r => r.risk_level === "HIGH").length;
   const medCount = Object.values(results).filter(r => r.risk_level === "MEDIUM").length;
   const avgScore = Object.values(results).length
     ? (Object.values(results).reduce((s, r) => s + r.risk_score, 0) / Object.values(results).length * 100).toFixed(0)
     : "--";
 
-  const selectedBorrower = borrowers.find(b => b.id === selected);
+  const selectedBorrower = activeLoans.find(b => b.id === selected);
   const selectedResult = selected ? results[selected] : null;
-  const maxShap = selectedResult
+  const maxShap = selectedResult && selectedResult.reasons?.length
     ? Math.max(...selectedResult.reasons.map(r => Math.abs(r.shap_value)))
     : 1;
+
+  const purposeIcons = {personal:"👤", home:"🏠", car:"🚗", education:"🎓", business:"💼", medical:"🏥"};
 
   return (
     <>
@@ -213,13 +249,13 @@ export default function App() {
 
         <div className="stats-row">
           <div className="stat-card">
-            <div className="stat-label">Total Borrowers</div>
-            <div className="stat-value">{borrowers.length}</div>
-            <div className="stat-sub">Active portfolio</div>
+            <div className="stat-label">Active Loans</div>
+            <div className="stat-value">{activeLoans.length}</div>
+            <div className="stat-sub">Currently disbursed</div>
           </div>
           <div className="stat-card">
             <div className="stat-label">High Risk</div>
-            <div className="stat-value" style={{ color: "#e74c3c" }}>{dbStats ? dbStats.high : highCount}</div>
+            <div className="stat-value" style={{ color: "#e74c3c" }}>{highCount}</div>
             <div className="stat-sub">Needs attention</div>
           </div>
           <div className="stat-card">
@@ -229,134 +265,171 @@ export default function App() {
           </div>
           <div className="stat-card">
             <div className="stat-label">Avg Risk Score</div>
-            <div className="stat-value">{loading ? "--" : avgScore + "%"}</div>
+            <div className="stat-value">{loading || avgScore === "--" ? "--" : avgScore + "%"}</div>
             <div className="stat-sub">Portfolio average</div>
           </div>
         </div>
+
         {pendingApps.length > 0 && (
-  <div className="table-card" style={{marginBottom: 20}}>
-    <div className="table-header">
-      <span className="table-title">⏳ Pending Loan Applications</span>
-      <span className="table-count" style={{background:"#fff3cd", color:"#856404"}}>{pendingApps.length} awaiting review</span>
-    </div>
-    <div style={{padding: "0"}}>
-      {pendingApps.map(p => {
-        const colors = p.risk_level === "HIGH" ? {bg:"#fff0f0", text:"#c0392b", dot:"#e74c3c"}
-                     : p.risk_level === "MEDIUM" ? {bg:"#fffbf0", text:"#b7770d", dot:"#f39c12"}
-                     : {bg:"#f0fff4", text:"#1a7a3c", dot:"#27ae60"};
-        const purposeIcons = {personal:"👤", home:"🏠", car:"🚗", education:"🎓", business:"💼", medical:"🏥"};
-        return (
-          <div key={p.id} style={{
-            display:"flex", alignItems:"center", padding:"18px 24px",
-            borderBottom: "1px solid #f0f2f7", gap: 16
-          }}>
-            <div style={{fontSize: 28}}>{purposeIcons[p.purpose] || "💰"}</div>
-            <div style={{flex: 1}}>
-              <div style={{fontSize: 15, fontWeight: 600, color:"#1a1a2e"}}>
-                {p.borrower_name} <span style={{fontWeight: 400, color:"#8892a4"}}>· {p.borrower_email}</span>
-              </div>
-              <div style={{fontSize: 12, color:"#8892a4", marginTop: 2, fontFamily:"DM Mono, monospace"}}>
-                {p.purpose?.toUpperCase()} · ₹{p.loan_amnt.toLocaleString()} · {p.term}mo · {p.int_rate}% · DTI {p.dti}
-              </div>
+          <div className="table-card" style={{marginBottom: 20}}>
+            <div className="table-header">
+              <span className="table-title">⏳ Pending Loan Applications</span>
+              <span className="table-count" style={{background:"#fff3cd", color:"#856404"}}>{pendingApps.length} awaiting review</span>
             </div>
-            <span className="risk-badge" style={{background: colors.bg, color: colors.text}}>
-              <span className="risk-dot" style={{background: colors.dot}} />
-              {p.risk_level} · {Math.round(p.risk_score * 100)}%
-            </span>
-            <button onClick={() => handleReject(p.id)} disabled={actionLoading === p.id}
-              style={{padding:"8px 16px", background:"#fff", color:"#c0392b", border:"1px solid #f5c6cb",
-                      borderRadius: 8, fontSize: 13, fontWeight: 600, cursor:"pointer", fontFamily:"inherit"}}>
-              Reject
-            </button>
-            <button onClick={() => handleApprove(p.id)} disabled={actionLoading === p.id}
-              style={{padding:"8px 16px", background:"#1a7a3c", color:"#fff", border:"none",
-                      borderRadius: 8, fontSize: 13, fontWeight: 600, cursor:"pointer", fontFamily:"inherit"}}>
-              {actionLoading === p.id ? "..." : "Approve"}
-            </button>
-          </div>
-        );
-      })}
-    </div>
-  </div>
-)}
-        <div className="table-card">
-          <div className="table-header">
-            <span className="table-title">Borrower Risk Overview</span>
-            <span className="table-count">{borrowers.length} borrowers</span>
-          </div>
-          <table>
-            <thead>
-              <tr>
-                <th>Borrower</th>
-                <th>Loan Amount</th>
-                <th>Interest</th>
-                <th>DTI</th>
-                <th>FICO</th>
-                <th>Term</th>
-                <th>Risk Score</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <tr className="loading-row">
-                  <td colSpan={8}>
-                    <span className="pulse">Fetching predictions...</span>
-                  </td>
-                </tr>
-              ) : borrowers.map(b => {
-                const r = results[b.id];
-                const colors = RISK[r?.risk_level || "UNKNOWN"];
-                const score = r ? Math.round(r.risk_score * 100) : 0;
+            <div style={{padding: 0}}>
+              {pendingApps.map(p => {
+                const colors = p.risk_level === "HIGH" ? {bg:"#fff0f0", text:"#c0392b", dot:"#e74c3c"}
+                             : p.risk_level === "MEDIUM" ? {bg:"#fffbf0", text:"#b7770d", dot:"#f39c12"}
+                             : {bg:"#f0fff4", text:"#1a7a3c", dot:"#27ae60"};
                 return (
-                  <tr key={b.id} className={selected === b.id ? "active" : ""}
-                    onClick={() => handleSelect(b)}>
-                    <td>
-                      <div className="borrower-cell">
-                        <div className="avatar" style={{ background: colors.avatarBg, color: colors.avatarText }}>
-                          {b.initials}
-                        </div>
-                        <div>
-                          <div className="borrower-name">{b.name}</div>
-                          <div className="borrower-grade">Grade {gradeLabel(b.grade)} · {b.emp_length}yr exp</div>
-                        </div>
+                  <div key={p.id} style={{
+                    display:"flex", alignItems:"center", padding:"18px 24px",
+                    borderBottom: "1px solid #f0f2f7", gap: 16
+                  }}>
+                    <div style={{fontSize: 28}}>{purposeIcons[p.purpose] || "💰"}</div>
+                    <div style={{flex: 1}}>
+                      <div style={{fontSize: 15, fontWeight: 600, color:"#1a1a2e"}}>
+                        {p.borrower_name} <span style={{fontWeight: 400, color:"#8892a4"}}>· {p.borrower_email}</span>
                       </div>
-                    </td>
-                    <td className="mono">₹{b.loan_amnt.toLocaleString()}</td>
-                    <td className="mono">{b.int_rate}%</td>
-                    <td className="mono">{b.dti}</td>
-                    <td className="mono">{b.fico_avg}</td>
-                    <td className="mono">{b.term}mo</td>
-                    <td>
-                      <div className="score-bar-wrap">
-                        <div className="score-bar-bg">
-                          <div className="score-bar-fill" style={{ width: score + "%", background: colors.bar }} />
-                        </div>
-                        <span className="score-text" style={{ color: colors.text }}>{score}%</span>
+                      <div style={{fontSize: 12, color:"#8892a4", marginTop: 2, fontFamily:"DM Mono, monospace"}}>
+                        {p.purpose?.toUpperCase()} · ₹{p.loan_amnt.toLocaleString()} · {p.term}mo · {p.int_rate}% · DTI {p.dti}
                       </div>
-                    </td>
-                    <td>
-                      <span className="risk-badge" style={{ background: colors.bg, color: colors.text }}>
-                        <span className="risk-dot" style={{ background: colors.dot }} />
-                        {r?.risk_level}
-                      </span>
-                    </td>
-                  </tr>
+                    </div>
+                    <span className="risk-badge" style={{background: colors.bg, color: colors.text}}>
+                      <span className="risk-dot" style={{background: colors.dot}} />
+                      {p.risk_level} · {Math.round(p.risk_score * 100)}%
+                    </span>
+                    <button onClick={() => handleReject(p.id)} disabled={actionLoading === p.id}
+                      style={{padding:"8px 16px", background:"#fff", color:"#c0392b", border:"1px solid #f5c6cb",
+                              borderRadius: 8, fontSize: 13, fontWeight: 600, cursor:"pointer", fontFamily:"inherit"}}>
+                      Reject
+                    </button>
+                    <button onClick={() => handleApprove(p.id)} disabled={actionLoading === p.id}
+                      style={{padding:"8px 16px", background:"#1a7a3c", color:"#fff", border:"none",
+                              borderRadius: 8, fontSize: 13, fontWeight: 600, cursor:"pointer", fontFamily:"inherit"}}>
+                      {actionLoading === p.id ? "..." : "Approve"}
+                    </button>
+                  </div>
                 );
               })}
-            </tbody>
-          </table>
+            </div>
+          </div>
+        )}
+
+        {approvedApps.length > 0 && (
+          <div className="table-card" style={{marginBottom: 20}}>
+            <div className="table-header">
+              <span className="table-title">✓ Approved — Ready for Disbursement</span>
+              <span className="table-count" style={{background:"#d4f5e2", color:"#1a7a3c"}}>{approvedApps.length} ready</span>
+            </div>
+            <div style={{padding: 0}}>
+              {approvedApps.map(p => (
+                <div key={p.id} style={{
+                  display:"flex", alignItems:"center", padding:"18px 24px",
+                  borderBottom: "1px solid #f0f2f7", gap: 16
+                }}>
+                  <div style={{fontSize: 28}}>{purposeIcons[p.purpose] || "💰"}</div>
+                  <div style={{flex: 1}}>
+                    <div style={{fontSize: 15, fontWeight: 600, color:"#1a1a2e"}}>
+                      {p.borrower_name} <span style={{fontWeight: 400, color:"#8892a4"}}>· {p.borrower_email}</span>
+                    </div>
+                    <div style={{fontSize: 12, color:"#8892a4", marginTop: 2, fontFamily:"DM Mono, monospace"}}>
+                      {p.purpose?.toUpperCase()} · ₹{p.loan_amnt.toLocaleString()} · EMI ₹{Math.round(p.installment).toLocaleString()} · {p.term}mo · {p.int_rate}%
+                    </div>
+                  </div>
+                  <span className="risk-badge" style={{background:"#d4f5e2", color:"#1a7a3c"}}>
+                    ✓ APPROVED
+                  </span>
+                  <button onClick={() => handleDisburse(p.id)} disabled={actionLoading === p.id}
+                    style={{padding:"8px 18px", background:"#1a1a2e", color:"#fff", border:"none",
+                            borderRadius: 8, fontSize: 13, fontWeight: 600, cursor:"pointer", fontFamily:"inherit"}}>
+                    {actionLoading === p.id ? "Disbursing..." : "💰 Disburse Funds"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="table-card">
+          <div className="table-header">
+            <span className="table-title">Active Loans · Risk Monitoring</span>
+            <span className="table-count">{activeLoans.length} active</span>
+          </div>
+          {activeLoans.length === 0 ? (
+            <div style={{padding: "60px 24px", textAlign:"center", color:"#8892a4", fontSize: 14}}>
+              No active loans yet. Approve and disburse loans to see them here.
+            </div>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Borrower</th>
+                  <th>Purpose</th>
+                  <th>Loan Amount</th>
+                  <th>Interest</th>
+                  <th>DTI</th>
+                  <th>FICO</th>
+                  <th>Risk Score</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {activeLoans.map(b => {
+                  const r = results[b.id] || { risk_score: b.risk_score, risk_level: b.risk_level, reasons: [] };
+                  const colors = RISK[r?.risk_level || "UNKNOWN"];
+                  const score = Math.round((r.risk_score || 0) * 100);
+                  const initials = b.borrower_name.split(" ").map(s => s[0]).join("").slice(0,2).toUpperCase();
+                  return (
+                    <tr key={b.id} className={selected === b.id ? "active" : ""}
+                      onClick={() => handleSelect(b)}>
+                      <td>
+                        <div className="borrower-cell">
+                          <div className="avatar" style={{ background: colors.avatarBg, color: colors.avatarText }}>
+                            {initials}
+                          </div>
+                          <div>
+                            <div className="borrower-name">{b.borrower_name}</div>
+                            <div className="borrower-grade">{b.borrower_email}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td>{purposeIcons[b.purpose]} <span style={{textTransform:"capitalize", fontSize:13}}>{b.purpose}</span></td>
+                      <td className="mono">₹{b.loan_amnt.toLocaleString()}</td>
+                      <td className="mono">{b.int_rate}%</td>
+                      <td className="mono">{b.dti}</td>
+                      <td className="mono">{b.fico_avg}</td>
+                      <td>
+                        <div className="score-bar-wrap">
+                          <div className="score-bar-bg">
+                            <div className="score-bar-fill" style={{ width: score + "%", background: colors.bar }} />
+                          </div>
+                          <span className="score-text" style={{ color: colors.text }}>{score}%</span>
+                        </div>
+                      </td>
+                      <td>
+                        <span className="risk-badge" style={{ background: colors.bg, color: colors.text }}>
+                          <span className="risk-dot" style={{ background: colors.dot }} />
+                          {r?.risk_level}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
         </div>
 
         {selectedBorrower && selectedResult && (
           <div className="detail-panel">
             <div className="detail-header">
               <div className="detail-avatar"
-                style={{ background: RISK[selectedResult.risk_level].avatarBg, color: RISK[selectedResult.risk_level].avatarText }}>
-                {selectedBorrower.initials}
+                style={{ background: RISK[selectedResult.risk_level || "UNKNOWN"].avatarBg, color: RISK[selectedResult.risk_level || "UNKNOWN"].avatarText }}>
+                {selectedBorrower.borrower_name.split(" ").map(s => s[0]).join("").slice(0,2).toUpperCase()}
               </div>
               <div style={{flex: 1}}>
-                <div className="detail-name">Why is {selectedBorrower.name} flagged?</div>
+                <div className="detail-name">Why is {selectedBorrower.borrower_name} flagged?</div>
                 <div style={{display:"flex", gap:6, flexWrap:"wrap", marginTop:6}}>
                   {selectedResult.survival?.days_to_default && (
                     <div style={{
@@ -380,7 +453,7 @@ export default function App() {
                   )}
                 </div>
                 <div className="detail-meta" style={{marginTop: 8}}>
-                  Risk score: {Math.round(selectedResult.risk_score * 100)}% ·
+                  Risk score: {Math.round((selectedResult.risk_score || 0) * 100)}% ·
                   Loan ₹{selectedBorrower.loan_amnt.toLocaleString()} ·
                   {selectedResult.risk_level} RISK
                 </div>
@@ -388,7 +461,7 @@ export default function App() {
             </div>
             <div className="detail-body">
               <div className="detail-section-title">Top risk factors (SHAP explanation)</div>
-              {selectedResult.reasons.map((r, i) => {
+              {selectedResult.reasons?.map((r, i) => {
                 const isIncrease = r.impact === "increases risk";
                 const barWidth = Math.round((Math.abs(r.shap_value) / maxShap) * 80);
                 return (
@@ -419,13 +492,9 @@ export default function App() {
 
               {(loadingRec || recommendations) && (
                 <div style={{marginTop: 24, paddingTop: 20, borderTop: "1px solid #f0f2f7"}}>
-                  <div className="detail-section-title">
-                    🤖 AI Recovery Recommendations
-                  </div>
+                  <div className="detail-section-title">🤖 AI Recovery Recommendations</div>
                   {loadingRec && (
-                    <p style={{color: "#8892a4", fontSize: 13}} className="pulse">
-                      Generating AI recommendations...
-                    </p>
+                    <p style={{color: "#8892a4", fontSize: 13}} className="pulse">Generating AI recommendations...</p>
                   )}
                   {recommendations?.actions?.map((a, i) => {
                     const colors = a.priority === "HIGH" ? {bg:"#fde8e8", text:"#c0392b"}
@@ -444,9 +513,7 @@ export default function App() {
                     );
                   })}
                   {recommendations?.error && (
-                    <p style={{color: "#c0392b", fontSize: 13}}>
-                      {recommendations.error}
-                    </p>
+                    <p style={{color: "#c0392b", fontSize: 13}}>{recommendations.error}</p>
                   )}
                 </div>
               )}

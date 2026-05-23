@@ -538,7 +538,63 @@ def get_pending_applications(current_user: dict = Depends(get_current_user)):
     session.close()
     return result
 
+@app.get("/approved-applications")
+def get_approved_applications(current_user: dict = Depends(get_current_user)):
+    """For analysts — list approved loans awaiting disbursement"""
+    if current_user.get("role") != "analyst":
+        return {"error": "Only analysts can view this"}
 
+    session = Session()
+    loans = session.query(Loan).filter(Loan.status == "approved").all()
+    result = []
+    for l in loans:
+        user = session.query(User).filter(User.id == l.user_id).first()
+        result.append({
+            "id": l.id,
+            "borrower_name": user.name if user else "Unknown",
+            "borrower_email": user.email if user else "",
+            "purpose": l.purpose,
+            "loan_amnt": l.loan_amnt,
+            "term": l.term,
+            "int_rate": l.int_rate,
+            "installment": l.installment,
+            "risk_score": round(l.risk_score, 4),
+            "risk_level": l.risk_level,
+            "reviewed_at": str(l.reviewed_at) if l.reviewed_at else None
+        })
+    session.close()
+    return result
+
+@app.get("/active-loans")
+def get_active_loans(current_user: dict = Depends(get_current_user)):
+    """For analysts — list all active (disbursed) loans for risk monitoring"""
+    if current_user.get("role") != "analyst":
+        return {"error": "Only analysts can view this"}
+
+    session = Session()
+    loans = session.query(Loan).filter(Loan.status == "active").order_by(Loan.created_at.desc()).all()
+    result = []
+    for l in loans:
+        user = session.query(User).filter(User.id == l.user_id).first()
+        result.append({
+            "id": l.id,
+            "borrower_name": user.name if user else "Unknown",
+            "borrower_email": user.email if user else "",
+            "purpose": l.purpose,
+            "loan_amnt": l.loan_amnt,
+            "term": l.term,
+            "int_rate": l.int_rate,
+            "installment": l.installment,
+            "dti": l.dti,
+            "fico_avg": l.fico_avg,
+            "annual_inc": l.annual_inc,
+            "emp_length": l.emp_length,
+            "grade": l.grade,
+            "risk_score": round(l.risk_score, 4),
+            "risk_level": l.risk_level
+        })
+    session.close()
+    return result
 @app.post("/approve-loan/{loan_id}")
 def approve_loan(loan_id: int, current_user: dict = Depends(get_current_user)):
     """Analyst approves a pending loan"""
