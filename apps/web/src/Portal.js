@@ -263,14 +263,14 @@ export default function Portal() {
                       </div>
                     )}
                     {l.status === "active" && (
-                      <>
-                        <button className="btn-secondary">View details</button>
-                        <button className="btn-secondary">Request deferral</button>
-                        <button className="btn-pay" onClick={() => handlePayEMI(l)} disabled={paying === l.id}>
-                            {paying === l.id ? "Processing..." : "Pay EMI"}
-                        </button>
-                      </>
-                    )}
+  <>
+    <button className="btn-secondary" onClick={() => navigate(`/loan/${l.id}`)}>View details</button>
+    <button className="btn-secondary" onClick={() => navigate(`/loan/${l.id}`)}>Request deferral</button>
+    <button className="btn-pay" onClick={() => handlePayEMI(l)} disabled={paying === l.id}>
+      {paying === l.id ? "Processing..." : "Pay EMI"}
+    </button>
+  </>
+)}
                     {l.status === "paid" && (
                       <div className="status-msg" style={{ background: "#e0f2fe", color: "#0369a1" }}>
                         ✓ Loan fully paid

@@ -95,6 +95,18 @@ class Payment(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     paid_at = Column(DateTime, nullable=True)
 
+class DeferralRequest(Base):
+    __tablename__ = "deferral_requests"
+    id = Column(Integer, primary_key=True, index=True)
+    loan_id = Column(Integer, ForeignKey("loans.id"))
+    user_id = Column(Integer, ForeignKey("users.id"))
+    reason = Column(String)
+    requested_months = Column(Integer, default=1)
+    status = Column(String, default="pending")  # pending, approved, rejected
+    analyst_note = Column(String, nullable=True)
+    reviewed_by = Column(Integer, nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 Base.metadata.create_all(bind=engine)
 
 MONGO_URL = os.getenv("MONGO_URL", "mongodb://loansense:loansense123@localhost:27017/loansense_db?authSource=admin")
@@ -809,3 +821,155 @@ def get_payment_history(loan_id: int, current_user: dict = Depends(get_current_u
     ]
     session.close()
     return result
+# ============== DEFERRAL ENDPOINTS ==============
+
+@app.post("/request-deferral/{loan_id}")
+def request_deferral(loan_id: int, data: dict, current_user: dict = Depends(get_current_user)):
+    """Borrower requests EMI deferral"""
+    session = Session()
+    try:
+        loan = session.query(Loan).filter(
+            Loan.id == loan_id,
+            Loan.user_id == current_user["user_id"]
+        ).first()
+
+        if not loan:
+            session.close()
+            return {"error": "Loan not found"}
+        if loan.status != "active":
+            session.close()
+            return {"error": "Can only defer active loans"}
+
+        # Check if there's already a pending request
+        existing = session.query(DeferralRequest).filter(
+            DeferralRequest.loan_id == loan_id,
+            DeferralRequest.status == "pending"
+        ).first()
+        if existing:
+            session.close()
+            return {"error": "You already have a pending deferral request"}
+
+        reason = data.get("reason", "").strip()
+        months = int(data.get("months", 1))
+
+        if not reason or len(reason) < 10:
+            session.close()
+            return {"error": "Please provide a detailed reason (at least 10 characters)"}
+        if months < 1 or months > 6:
+            session.close()
+            return {"error": "Deferral period must be between 1 and 6 months"}
+
+        deferral = DeferralRequest(
+            loan_id=loan_id,
+            user_id=current_user["user_id"],
+            reason=reason,
+            requested_months=months,
+            status="pending"
+        )
+        session.add(deferral)
+        session.commit()
+        session.refresh(deferral)
+        deferral_id = deferral.id
+        session.close()
+
+        return {
+            "success": True,
+            "deferral_id": deferral_id,
+            "message": "Deferral request submitted. Bank will review it shortly."
+        }
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
+
+@app.get("/my-deferrals/{loan_id}")
+def get_my_deferrals(loan_id: int, current_user: dict = Depends(get_current_user)):
+    """Get deferral requests for a specific loan"""
+    session = Session()
+    deferrals = session.query(DeferralRequest).filter(
+        DeferralRequest.loan_id == loan_id,
+        DeferralRequest.user_id == current_user["user_id"]
+    ).order_by(DeferralRequest.created_at.desc()).all()
+
+    result = [
+        {
+            "id": d.id,
+            "reason": d.reason,
+            "requested_months": d.requested_months,
+            "status": d.status,
+            "analyst_note": d.analyst_note,
+            "created_at": str(d.created_at),
+            "reviewed_at": str(d.reviewed_at) if d.reviewed_at else None
+        }
+        for d in deferrals
+    ]
+    session.close()
+    return result
+
+
+@app.get("/pending-deferrals")
+def get_pending_deferrals(current_user: dict = Depends(get_current_user)):
+    """For analysts — list all pending deferral requests"""
+    if current_user.get("role") != "analyst":
+        return {"error": "Only analysts can view this"}
+
+    session = Session()
+    deferrals = session.query(DeferralRequest).filter(
+        DeferralRequest.status == "pending"
+    ).order_by(DeferralRequest.created_at.desc()).all()
+
+    result = []
+    for d in deferrals:
+        user = session.query(User).filter(User.id == d.user_id).first()
+        loan = session.query(Loan).filter(Loan.id == d.loan_id).first()
+        result.append({
+            "id": d.id,
+            "loan_id": d.loan_id,
+            "borrower_name": user.name if user else "Unknown",
+            "borrower_email": user.email if user else "",
+            "purpose": loan.purpose if loan else "",
+            "loan_amnt": loan.loan_amnt if loan else 0,
+            "installment": loan.installment if loan else 0,
+            "reason": d.reason,
+            "requested_months": d.requested_months,
+            "created_at": str(d.created_at)
+        })
+    session.close()
+    return result
+
+
+@app.post("/review-deferral/{deferral_id}")
+def review_deferral(deferral_id: int, data: dict, current_user: dict = Depends(get_current_user)):
+    """Analyst approves or rejects a deferral request"""
+    if current_user.get("role") != "analyst":
+        return {"error": "Only analysts can review deferrals"}
+
+    decision = data.get("decision")  # "approve" or "reject"
+    note = data.get("note", "")
+
+    if decision not in ["approve", "reject"]:
+        return {"error": "Decision must be 'approve' or 'reject'"}
+
+    session = Session()
+    try:
+        deferral = session.query(DeferralRequest).filter(
+            DeferralRequest.id == deferral_id
+        ).first()
+        if not deferral:
+            session.close()
+            return {"error": "Deferral request not found"}
+        if deferral.status != "pending":
+            session.close()
+            return {"error": f"Deferral already {deferral.status}"}
+
+        deferral.status = "approved" if decision == "approve" else "rejected"
+        deferral.analyst_note = note
+        deferral.reviewed_by = current_user["user_id"]
+        deferral.reviewed_at = datetime.utcnow()
+        session.commit()
+        session.close()
+
+        return {"success": True, "message": f"Deferral {deferral.status}"}
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}

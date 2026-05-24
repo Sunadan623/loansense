@@ -87,7 +87,7 @@ export default function App() {
   const [actionLoading, setActionLoading] = useState(null);
   const [approvedApps, setApprovedApps] = useState([]);
   const [activeLoans, setActiveLoans] = useState([]);
-
+  const [pendingDeferrals, setPendingDeferrals] = useState([]);
   useEffect(() => {
     const fetchAll = async () => {
       const res = {};
@@ -143,7 +143,15 @@ export default function App() {
           }
         }
       } catch (e) { console.log("Active loans fetch failed"); }
-
+      try {
+        const token = localStorage.getItem("token");
+        const { data: deferrals } = await axios.get("http://127.0.0.1:8000/pending-deferrals", {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (Array.isArray(deferrals)) setPendingDeferrals(deferrals);
+      } catch (e) {
+        console.log("Pending deferrals fetch failed");
+      }
       setResults(res);
       setLoading(false);
     };
@@ -214,6 +222,21 @@ export default function App() {
       setApprovedApps(approvedApps.filter(p => p.id !== loanId));
       if (disbursed) setActiveLoans([...activeLoans, disbursed]);
     } catch (e) { alert("Disbursement failed"); }
+    setActionLoading(null);
+  };
+  const handleDeferralDecision = async (deferralId, decision) => {
+    const note = prompt(`Note for ${decision === "approve" ? "approval" : "rejection"} (optional):`, "");
+    setActionLoading(deferralId);
+    try {
+      const token = localStorage.getItem("token");
+      await axios.post(`http://127.0.0.1:8000/review-deferral/${deferralId}`,
+        { decision, note: note || "" },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setPendingDeferrals(pendingDeferrals.filter(d => d.id !== deferralId));
+    } catch (e) {
+      alert("Decision failed");
+    }
     setActionLoading(null);
   };
 
@@ -420,7 +443,55 @@ export default function App() {
             </table>
           )}
         </div>
-
+        {pendingDeferrals.length > 0 && (
+          <div className="table-card" style={{marginBottom: 20}}>
+            <div className="table-header">
+              <span className="table-title">⏸ Pending Deferral Requests</span>
+              <span className="table-count" style={{background:"#fff3cd", color:"#856404"}}>{pendingDeferrals.length} awaiting review</span>
+            </div>
+            <div style={{padding: 0}}>
+              {pendingDeferrals.map(d => (
+                <div key={d.id} style={{
+                  padding:"18px 24px",
+                  borderBottom: "1px solid #f0f2f7"
+                }}>
+                  <div style={{display:"flex", alignItems:"center", gap:16, marginBottom: 10}}>
+                    <div style={{fontSize: 28}}>{purposeIcons[d.purpose] || "💰"}</div>
+                    <div style={{flex: 1}}>
+                      <div style={{fontSize: 15, fontWeight: 600, color:"#1a1a2e"}}>
+                        {d.borrower_name} <span style={{fontWeight: 400, color:"#8892a4"}}>· {d.borrower_email}</span>
+                      </div>
+                      <div style={{fontSize: 12, color:"#8892a4", marginTop: 2, fontFamily:"DM Mono, monospace"}}>
+                        {d.purpose?.toUpperCase()} · ₹{d.loan_amnt.toLocaleString()} · EMI ₹{Math.round(d.installment).toLocaleString()}
+                      </div>
+                    </div>
+                    <span className="risk-badge" style={{background:"#fff3cd", color:"#856404"}}>
+                      Wants to defer {d.requested_months}mo
+                    </span>
+                  </div>
+                  <div style={{
+                    background: "#f9fafc", padding: "10px 14px", borderRadius: 8,
+                    fontSize: 13, color: "#5a6378", marginBottom: 10, lineHeight: 1.5
+                  }}>
+                    💬 "{d.reason}"
+                  </div>
+                  <div style={{display:"flex", gap: 10, justifyContent:"flex-end"}}>
+                    <button onClick={() => handleDeferralDecision(d.id, "reject")} disabled={actionLoading === d.id}
+                      style={{padding:"8px 16px", background:"#fff", color:"#c0392b", border:"1px solid #f5c6cb",
+                              borderRadius: 8, fontSize: 13, fontWeight: 600, cursor:"pointer", fontFamily:"inherit"}}>
+                      Reject
+                    </button>
+                    <button onClick={() => handleDeferralDecision(d.id, "approve")} disabled={actionLoading === d.id}
+                      style={{padding:"8px 16px", background:"#1a7a3c", color:"#fff", border:"none",
+                              borderRadius: 8, fontSize: 13, fontWeight: 600, cursor:"pointer", fontFamily:"inherit"}}>
+                      {actionLoading === d.id ? "..." : "Approve"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {selectedBorrower && selectedResult && (
           <div className="detail-panel">
             <div className="detail-header">

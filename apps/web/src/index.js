@@ -6,6 +6,7 @@ import Login from "./Login";
 import Signup from "./Signup";
 import Portal from "./Portal";
 import ApplyLoan from "./ApplyLoan";
+import LoanDetails from "./LoanDetails";
 
 const isLoggedIn = () => !!localStorage.getItem("token");
 const getRole = () => {
@@ -35,6 +36,7 @@ root.render(
       <Route path="/signup" element={<PublicRoute><Signup /></PublicRoute>} />
       <Route path="/portal" element={<ProtectedRoute><Portal /></ProtectedRoute>} />
       <Route path="/apply" element={<ProtectedRoute><ApplyLoan /></ProtectedRoute>} />
+      <Route path="/loan/:loanId" element={<ProtectedRoute><LoanDetails /></ProtectedRoute>} />
       <Route path="/dashboard" element={<ProtectedRoute requireRole="analyst"><App /></ProtectedRoute>} />
       <Route path="/" element={<Navigate to="/portal" replace />} />
       <Route path="*" element={<Navigate to="/portal" replace />} />
