@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
-
+import NotificationBell from "./NotificationBell";
+import SupportChat from "./SupportChat";
 const PURPOSE_ICONS = {
   personal: "👤", home: "🏠", car: "🚗",
   education: "🎓", business: "💼", medical: "🏥"
@@ -57,34 +58,51 @@ export default function Portal() {
   const [loans, setLoans] = useState([]);
   const [loading, setLoading] = useState(true);
   const [paying, setPaying] = useState(null);
+  const [smartModal, setSmartModal] = useState(null); // {loan, status} when open
+  const [partialAmount, setPartialAmount] = useState("");
   const navigate = useNavigate();
   const handlePayEMI = async (loan) => {
     setPaying(loan.id);
     try {
       const token = localStorage.getItem("token");
-      // Step 1: Create Razorpay order on backend
+      const { data: status } = await axios.get(`http://127.0.0.1:8000/emi-status/${loan.id}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setSmartModal({ loan, status });
+      setPartialAmount(String(Math.round(status.min_partial_amount)));
+      setPaying(null);
+    } catch (e) {
+      alert("Could not load payment info");
+      setPaying(null);
+    }
+  };
+
+  const processPayment = async (paymentType, customAmount = null) => {
+    const loan = smartModal.loan;
+    setSmartModal(null);
+    setPaying(loan.id);
+    try {
+      const token = localStorage.getItem("token");
       const { data: orderData } = await axios.post(
         `http://127.0.0.1:8000/create-payment-order/${loan.id}`,
-        {},
+        { payment_type: paymentType, amount: customAmount },
         { headers: { Authorization: `Bearer ${token}` } }
       );
 
       if (orderData.error) {
-        alert("Failed to create payment: " + orderData.error);
+        alert("Payment failed: " + orderData.error);
         setPaying(null);
         return;
       }
 
-      // Step 2: Open Razorpay checkout
       const options = {
         key: orderData.key_id,
         amount: orderData.amount,
         currency: orderData.currency,
         name: "LoanSense",
-        description: `EMI for ${orderData.loan_purpose} loan`,
+        description: `${paymentType === "partial" ? "Partial EMI" : "EMI"} for ${orderData.loan_purpose} loan${orderData.late_fee > 0 ? ` (incl. ₹${orderData.late_fee} late fee)` : ""}`,
         order_id: orderData.order_id,
         handler: async (response) => {
-          // Step 3: Verify payment on backend
           try {
             const { data: verifyData } = await axios.post(
               "http://127.0.0.1:8000/verify-payment",
@@ -95,25 +113,18 @@ export default function Portal() {
               },
               { headers: { Authorization: `Bearer ${token}` } }
             );
-
             if (verifyData.success) {
-              alert("✓ Payment successful! ₹" + Math.round(orderData.emi_amount).toLocaleString() + " paid.");
+              alert(`✓ ₹${Math.round(orderData.emi_amount).toLocaleString()} paid successfully!`);
+              window.location.reload();
             } else {
-              alert("Payment verification failed: " + verifyData.error);
+              alert("Payment verification failed");
             }
-          } catch (e) {
-            alert("Verification error");
-          }
+          } catch (e) { alert("Verification error"); }
           setPaying(null);
         },
-        prefill: {
-          name: user.name,
-          email: user.email,
-        },
+        prefill: { name: user.name, email: user.email },
         theme: { color: "#1a1a2e" },
-        modal: {
-          ondismiss: () => setPaying(null)
-        }
+        modal: { ondismiss: () => setPaying(null) }
       };
 
       const rzp = new window.Razorpay(options);
@@ -179,6 +190,7 @@ export default function Portal() {
             <div className="nav-logo-text">LoanSense</div>
           </div>
           <div className="nav-user">
+            <NotificationBell />
             <div className="nav-avatar">{initials}</div>
             <div>
               <div className="nav-name">{user.name}</div>
@@ -195,7 +207,17 @@ export default function Portal() {
               <div className="welcome-sub">Here's your loan overview</div>
             </div>
             {loans.length > 0 && (
-              <button className="apply-btn" onClick={() => navigate("/apply")}>+ Apply for new loan</button>
+              <div style={{display: "flex", gap: 10, flexWrap: "wrap"}}>
+                <button className="apply-btn" onClick={() => navigate("/faq")}
+                  style={{background: "#fff", color: "#1a1a2e", border: "1px solid #e0e4ec"}}>
+                  ❓ Help
+                </button>
+                <button className="apply-btn" onClick={() => navigate("/affordability")}
+                  style={{background: "linear-gradient(135deg, #4c6ef5 0%, #7048e8 100%)"}}>
+                  💡 Check affordability
+                </button>
+                <button className="apply-btn" onClick={() => navigate("/apply")}>+ Apply for new loan</button>
+              </div>
             )}
           </div>
 
@@ -282,6 +304,123 @@ export default function Portal() {
             })
           )}
         </div>
+        {smartModal && (
+          <div style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            zIndex: 1000, padding: 20
+          }} onClick={() => setSmartModal(null)}>
+            <div style={{
+              background: "#fff", borderRadius: 16, padding: 32,
+              maxWidth: 480, width: "100%", maxHeight: "90vh", overflowY: "auto"
+            }} onClick={e => e.stopPropagation()}>
+              <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: 20}}>
+                <div style={{fontSize: 18, fontWeight: 600}}>💳 EMI Payment</div>
+                <button onClick={() => setSmartModal(null)} style={{
+                  background: "none", border: "none", fontSize: 24, cursor: "pointer", color: "#8892a4"
+                }}>×</button>
+              </div>
+
+              <div style={{
+                padding: 16, borderRadius: 12, marginBottom: 20,
+                background: smartModal.status.suggestion.primary === "urgent" ? "#fde8e8"
+                          : smartModal.status.suggestion.primary === "late" ? "#fff3cd"
+                          : smartModal.status.suggestion.primary === "due_soon" ? "#fff3cd"
+                          : "#d4f5e2",
+                border: "1px solid " + (smartModal.status.suggestion.primary === "urgent" ? "#f5c6cb"
+                          : smartModal.status.suggestion.primary === "late" ? "#ffeaa7"
+                          : smartModal.status.suggestion.primary === "due_soon" ? "#ffeaa7"
+                          : "#c3e6cb")
+              }}>
+                <div style={{fontSize: 15, fontWeight: 600, marginBottom: 6, color: "#1a1a2e"}}>
+                  {smartModal.status.suggestion.title}
+                </div>
+                <div style={{fontSize: 13, color: "#5a6378", lineHeight: 1.5}}>
+                  {smartModal.status.suggestion.description}
+                </div>
+              </div>
+
+              <div style={{padding: "12px 0", borderTop: "1px solid #f0f2f7", borderBottom: "1px solid #f0f2f7", marginBottom: 16}}>
+                <div style={{display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6}}>
+                  <span style={{color: "#8892a4"}}>Expected EMI</span>
+                  <span style={{fontWeight: 600, fontFamily: "DM Mono"}}>₹{smartModal.status.expected_emi.toLocaleString()}</span>
+                </div>
+                {smartModal.status.emi_adjustment > 0 && (
+                  <div style={{
+                    background: "#fff8e6", border: "1px solid #ffe0a3", borderRadius: 8,
+                    padding: "8px 10px", fontSize: 11, color: "#8a6d3b", marginBottom: 8, lineHeight: 1.4
+                  }}>
+                    ⓘ This includes +₹{smartModal.status.emi_adjustment.toLocaleString()}/month from your earlier partial payment
+                    (₹{smartModal.status.carryover_balance.toLocaleString()} spread across remaining EMIs).
+                    Base EMI was ₹{smartModal.status.base_emi.toLocaleString()}.
+                  </div>
+                )}
+                {smartModal.status.late_fee > 0 && (
+                  <div style={{display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6, color: "#c0392b"}}>
+                    <span>Late fee ({smartModal.status.days_late} days late)</span>
+                    <span style={{fontWeight: 600, fontFamily: "DM Mono"}}>+ ₹{smartModal.status.late_fee.toLocaleString()}</span>
+                  </div>
+                )}
+                <div style={{display: "flex", justifyContent: "space-between", fontSize: 14, fontWeight: 600, paddingTop: 6, borderTop: "1px solid #f0f2f7"}}>
+                  <span>Total due today</span>
+                  <span style={{fontFamily: "DM Mono"}}>₹{smartModal.status.total_due_today.toLocaleString()}</span>
+                </div>
+              </div>
+
+              <button onClick={() => processPayment("full")} style={{
+                width: "100%", padding: 14, background: "#1a7a3c", color: "#fff",
+                border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600,
+                cursor: "pointer", marginBottom: 10, fontFamily: "inherit"
+              }}>
+                Pay Full ₹{smartModal.status.total_due_today.toLocaleString()}
+              </button>
+
+              <div style={{
+                background: "#fafbfc", padding: 14, borderRadius: 10, marginBottom: 10,
+                border: "1px solid #eaedf3"
+              }}>
+                <div style={{fontSize: 13, fontWeight: 600, marginBottom: 8, color: "#1a1a2e"}}>
+                  Can't pay full? Pay partial amount:
+                </div>
+                <div style={{fontSize: 11, color: "#8892a4", marginBottom: 8}}>
+                  Minimum: ₹{smartModal.status.min_partial_amount.toLocaleString()} (30% of EMI). Remaining balance carries over.
+                </div>
+                <div style={{display: "flex", gap: 8}}>
+                  <input type="number" value={partialAmount}
+                    onChange={e => setPartialAmount(e.target.value)}
+                    min={smartModal.status.min_partial_amount}
+                    max={smartModal.status.expected_emi}
+                    style={{
+                      flex: 1, padding: "10px 12px", border: "1px solid #e0e4ec",
+                      borderRadius: 8, fontSize: 14, fontFamily: "inherit"
+                    }} />
+                  <button onClick={() => processPayment("partial", parseFloat(partialAmount))}
+                    style={{
+                      padding: "10px 18px", background: "#1a1a2e", color: "#fff",
+                      border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600,
+                      cursor: "pointer", fontFamily: "inherit"
+                    }}>
+                    Pay Partial
+                  </button>
+                </div>
+              </div>
+
+              {smartModal.status.suggestion.options?.includes("request_deferral") && (
+                <button onClick={() => {
+                  setSmartModal(null);
+                  navigate(`/loan/${smartModal.loan.id}`);
+                }} style={{
+                  width: "100%", padding: 12, background: "#fff", color: "#1a1a2e",
+                  border: "1px solid #e0e4ec", borderRadius: 10, fontSize: 13, fontWeight: 600,
+                  cursor: "pointer", fontFamily: "inherit"
+                }}>
+                  Can't pay anything? Request deferral instead
+                </button>
+              )}
+           </div>
+          </div>
+        )}
+        <SupportChat />
       </div>
     </>
   );

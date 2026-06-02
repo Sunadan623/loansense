@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import axios from "axios";
-
+import { useNavigate } from "react-router-dom";
+import NotificationBell from "./NotificationBell";
+import AnalystCharts from "./AnalystCharts";
 const RISK = {
   HIGH:   { bg: "#fff0f0", text: "#c0392b", bar: "#e74c3c", dot: "#e74c3c", avatarBg: "#fde8e8", avatarText: "#c0392b" },
   MEDIUM: { bg: "#fffbf0", text: "#b7770d", bar: "#f39c12", dot: "#f39c12", avatarBg: "#fef3d0", avatarText: "#b7770d" },
@@ -77,6 +79,12 @@ const styles = `
 `;
 
 export default function App() {
+  const navigate = useNavigate();
+  const handleLogout = () => {
+    localStorage.removeItem("token");
+    localStorage.removeItem("user");
+    navigate("/login");
+  };
   const [results, setResults] = useState({});
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -86,8 +94,19 @@ export default function App() {
   const [pendingApps, setPendingApps] = useState([]);
   const [actionLoading, setActionLoading] = useState(null);
   const [approvedApps, setApprovedApps] = useState([]);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [filterRisk, setFilterRisk] = useState("all"); // all, high, medium, low
+  const [filterPurpose, setFilterPurpose] = useState("all");
   const [activeLoans, setActiveLoans] = useState([]);
   const [pendingDeferrals, setPendingDeferrals] = useState([]);
+  const [tickets, setTickets] = useState([]);
+  const [ticketResponse, setTicketResponse] = useState({}); // {ticketId: "response text"}
+  const [respondingTo, setRespondingTo] = useState(null);
+  const [radar, setRadar] = useState([]);
+  const [restructureModal, setRestructureModal] = useState(null); // {loan}
+  const [restructureSim, setRestructureSim] = useState(null);
+  const [restructureForm, setRestructureForm] = useState({ extend_months: 6, rate_reduction: 1, reason: "" });
+  const [simulating, setSimulating] = useState(false);
   useEffect(() => {
     const fetchAll = async () => {
       const res = {};
@@ -151,6 +170,24 @@ export default function App() {
         if (Array.isArray(deferrals)) setPendingDeferrals(deferrals);
       } catch (e) {
         console.log("Pending deferrals fetch failed");
+      }
+      try {
+        const token = localStorage.getItem("token");
+        const { data: ticketsData } = await axios.get("http://127.0.0.1:8000/support/all-tickets", {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (Array.isArray(ticketsData)) setTickets(ticketsData);
+      } catch (e) {
+        console.log("Tickets fetch failed");
+      }
+      try {
+        const token = localStorage.getItem("token");
+        const { data: radarData } = await axios.get("http://127.0.0.1:8000/analyst/default-radar", {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (radarData && Array.isArray(radarData.loans)) setRadar(radarData.loans);
+      } catch (e) {
+        console.log("Radar fetch failed");
       }
       setResults(res);
       setLoading(false);
@@ -240,6 +277,84 @@ export default function App() {
     setActionLoading(null);
   };
 
+  const handleTicketRespond = async (ticketId, status = "resolved") => {
+    const response = ticketResponse[ticketId];
+    if (!response || response.trim().length < 10) {
+      alert("Response must be at least 10 characters");
+      return;
+    }
+    setRespondingTo(ticketId);
+    try {
+      const token = localStorage.getItem("token");
+      const { data } = await axios.post(
+        `http://127.0.0.1:8000/support/respond/${ticketId}`,
+        { response: response.trim(), status },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (data.success) {
+        setTickets(tickets.map(t => t.id === ticketId
+          ? { ...t, response: response.trim(), status, responded_at: new Date().toISOString() }
+          : t));
+        setTicketResponse({ ...ticketResponse, [ticketId]: "" });
+      } else {
+        alert(data.error || "Failed to respond");
+      }
+    } catch (e) {
+      alert("Could not send response");
+    }
+    setRespondingTo(null);
+  };
+
+  const openRestructureModal = async (loanFromRadar) => {
+    setRestructureModal({ loan: loanFromRadar });
+    setRestructureForm({ extend_months: 6, rate_reduction: 1, reason: "" });
+    runSimulation(loanFromRadar.loan_id, 6, 1);
+  };
+
+  const runSimulation = async (loanId, extendMonths, rateReduction) => {
+    setSimulating(true);
+    try {
+      const token = localStorage.getItem("token");
+      const { data } = await axios.post(
+        "http://127.0.0.1:8000/analyst/simulate-restructure",
+        { loan_id: loanId, extend_months: extendMonths, rate_reduction: rateReduction },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!data.error) setRestructureSim(data);
+    } catch (e) { /* silent */ }
+    setSimulating(false);
+  };
+
+  const applyRestructure = async () => {
+    if (!restructureForm.reason || restructureForm.reason.trim().length < 10) {
+      alert("Please provide a reason (at least 10 characters)");
+      return;
+    }
+    if (!window.confirm(`Apply restructuring? New EMI will be ₹${Math.round(restructureSim.new_emi).toLocaleString()}/month over ${restructureSim.new_tenure} months. This cannot be easily undone.`)) {
+      return;
+    }
+    try {
+      const token = localStorage.getItem("token");
+      const { data } = await axios.post(
+        `http://127.0.0.1:8000/analyst/apply-restructure/${restructureModal.loan.loan_id}`,
+        {
+          extend_months: parseInt(restructureForm.extend_months),
+          rate_reduction: parseFloat(restructureForm.rate_reduction),
+          reason: restructureForm.reason.trim()
+        },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (data.success) {
+        alert(`✓ Restructured! New EMI: ₹${Math.round(data.new_emi).toLocaleString()}, ${data.new_tenure} months at ${data.new_rate}%`);
+        setRestructureModal(null);
+        setRestructureSim(null);
+        window.location.reload();
+      } else {
+        alert(data.error || "Failed to apply");
+      }
+    } catch (e) { alert("Failed to apply restructure"); }
+  };
+
   const highCount = Object.values(results).filter(r => r.risk_level === "HIGH").length;
   const medCount = Object.values(results).filter(r => r.risk_level === "MEDIUM").length;
   const avgScore = Object.values(results).length
@@ -258,7 +373,7 @@ export default function App() {
     <>
       <style>{styles}</style>
       <div className="app">
-        <div className="header">
+      <div className="header">
           <div className="logo">
             <div className="logo-icon">
               <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
@@ -267,6 +382,14 @@ export default function App() {
               <div className="logo-title">LoanSense</div>
               <div className="logo-sub">AI-powered default prediction · India NBFC</div>
             </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+            <NotificationBell />
+            <button onClick={handleLogout} style={{
+              background: "none", border: "1px solid #e0e4ec", padding: "7px 14px",
+              borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer",
+              color: "#5a6378", fontFamily: "inherit"
+            }}>Sign out</button>
           </div>
         </div>
 
@@ -292,6 +415,95 @@ export default function App() {
             <div className="stat-sub">Portfolio average</div>
           </div>
         </div>
+
+        <AnalystCharts />
+
+        {radar.filter(r => r.band_moved > 0 || r.current_band === "HIGH" || r.warnings.length > 0).length > 0 && (
+          <div className="table-card" style={{marginBottom: 20}}>
+            <div className="table-header">
+              <span className="table-title">🎯 Default Radar · Loans Needing Attention</span>
+              <span className="table-count" style={{background:"#fde8e8", color:"#c0392b"}}>
+                {radar.filter(r => r.band_moved > 0).length} risk-up · {radar.filter(r => r.current_band === "HIGH").length} high
+              </span>
+            </div>
+            <div style={{padding: 0}}>
+              {radar.filter(r => r.band_moved > 0 || r.current_band === "HIGH" || r.warnings.length > 0).map(r => {
+                const bandColor = r.current_band === "HIGH" ? {bg:"#fde8e8", color:"#c0392b", dot:"#c0392b"}
+                              : r.current_band === "MEDIUM" ? {bg:"#fff3cd", color:"#856404", dot:"#f39c12"}
+                              : {bg:"#d4f5e2", color:"#1a7a3c", dot:"#1a7a3c"};
+                const deltaPct = Math.round(r.risk_delta * 100);
+                return (
+                  <div key={r.loan_id} style={{padding:"18px 24px", borderBottom:"1px solid #f0f2f7"}}>
+                    <div style={{display:"flex", alignItems:"flex-start", gap:14, marginBottom: 10}}>
+                      <div style={{fontSize: 26}}>{purposeIcons[r.purpose] || "💰"}</div>
+                      <div style={{flex: 1}}>
+                        <div style={{fontSize: 15, fontWeight: 600, color:"#1a1a2e"}}>
+                          {r.borrower_name}
+                          <span style={{fontWeight: 400, color:"#8892a4"}}> · {r.borrower_email}</span>
+                        </div>
+                        <div style={{fontSize: 12, color:"#8892a4", marginTop: 2, fontFamily:"DM Mono, monospace"}}>
+                          Loan #{r.loan_id} · {r.purpose?.toUpperCase()} · ₹{r.loan_amnt.toLocaleString()} · EMI ₹{Math.round(r.installment).toLocaleString()}
+                        </div>
+                      </div>
+                      <div style={{display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6}}>
+                        <span className="risk-badge" style={{background: bandColor.bg, color: bandColor.color}}>
+                          <span className="risk-dot" style={{background: bandColor.dot}} />
+                          {r.current_band} · {Math.round(r.current_risk * 100)}%
+                        </span>
+                        {r.band_moved > 0 && (
+                          <span style={{
+                            fontSize: 10, fontWeight: 700, color: "#c0392b",
+                            background: "#fde8e8", padding: "2px 8px", borderRadius: 10
+                          }}>
+                            ↑ Up from {r.original_band} (+{deltaPct}%)
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {r.warnings.length > 0 && (
+                      <div style={{
+                        background: "#fff8e6", border: "1px solid #ffe0a3",
+                        borderRadius: 8, padding: "10px 14px", marginBottom: 10
+                      }}>
+                        <div style={{fontSize: 11, fontWeight: 700, color: "#8a6d3b", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4}}>
+                          ⚠ Risk signals detected
+                        </div>
+                        <ul style={{margin: 0, paddingLeft: 20, fontSize: 12, color: "#5a6378", lineHeight: 1.6}}>
+                          {r.warnings.map((w, i) => <li key={i}>{w}</li>)}
+                        </ul>
+                      </div>
+                    )}
+
+                    <div style={{
+                      display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, fontSize: 11
+                    }}>
+                      <Stat label="Payments made" value={`${r.total_payments}`} />
+                      <Stat label="Late / Partial" value={`${r.late_payments} / ${r.partial_payments}`} />
+                      <Stat label="Last payment" value={r.days_since_last_payment != null ? `${r.days_since_last_payment}d ago` : "Never"} />
+                      <Stat label="Carry-over" value={r.carryover_balance > 0 ? `₹${r.carryover_balance.toLocaleString()}` : "—"} />
+                    </div>
+
+                    <div style={{display: "flex", justifyContent: "flex-end", marginTop: 12, gap: 8}}>
+                    <button onClick={() => handleSelect({id: r.loan_id, borrower_name: r.borrower_name, borrower_email: r.borrower_email})}
+                        style={{padding: "7px 14px", background: "#fff", color: "#1a1a2e",
+                          border: "1px solid #e0e4ec", borderRadius: 8, fontSize: 12, fontWeight: 600,
+                          cursor: "pointer", fontFamily: "inherit"}}>
+                        View borrower details
+                      </button>
+                      <button onClick={() => openRestructureModal(r)}
+                        style={{padding: "7px 14px", background: "#1a7a3c", color: "#fff",
+                          border: "none", borderRadius: 8, fontSize: 12, fontWeight: 600,
+                          cursor: "pointer", fontFamily: "inherit"}}>
+                        🔄 Restructure
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {pendingApps.length > 0 && (
           <div className="table-card" style={{marginBottom: 20}}>
@@ -374,10 +586,56 @@ export default function App() {
           </div>
         )}
 
-        <div className="table-card">
-          <div className="table-header">
-            <span className="table-title">Active Loans · Risk Monitoring</span>
-            <span className="table-count">{activeLoans.length} active</span>
+<div className="table-card">
+          <div className="table-header" style={{flexDirection: "column", alignItems: "stretch", gap: 14}}>
+            <div style={{display: "flex", justifyContent: "space-between", alignItems: "center"}}>
+              <span className="table-title">Active Loans · Risk Monitoring</span>
+              <span className="table-count">{activeLoans.length} total</span>
+            </div>
+            <div style={{display: "flex", gap: 10, flexWrap: "wrap"}}>
+              <input
+                type="text"
+                placeholder="🔍 Search by borrower name or email..."
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                style={{
+                  flex: "1 1 240px", padding: "8px 12px", border: "1px solid #e0e4ec",
+                  borderRadius: 8, fontSize: 13, fontFamily: "inherit", outline: "none"
+                }}
+              />
+              <select value={filterRisk} onChange={e => setFilterRisk(e.target.value)} style={{
+                padding: "8px 12px", border: "1px solid #e0e4ec", borderRadius: 8,
+                fontSize: 13, fontFamily: "inherit", background: "#fff", cursor: "pointer"
+              }}>
+                <option value="all">All Risk Levels</option>
+                <option value="HIGH">🔴 High Risk</option>
+                <option value="MEDIUM">🟡 Medium Risk</option>
+                <option value="LOW">🟢 Low Risk</option>
+              </select>
+              <select value={filterPurpose} onChange={e => setFilterPurpose(e.target.value)} style={{
+                padding: "8px 12px", border: "1px solid #e0e4ec", borderRadius: 8,
+                fontSize: 13, fontFamily: "inherit", background: "#fff", cursor: "pointer"
+              }}>
+                <option value="all">All Purposes</option>
+                <option value="personal">👤 Personal</option>
+                <option value="home">🏠 Home</option>
+                <option value="car">🚗 Car</option>
+                <option value="education">🎓 Education</option>
+                <option value="business">💼 Business</option>
+                <option value="medical">🏥 Medical</option>
+                <option value="gold">🪙 Gold</option>
+              </select>
+              {(searchQuery || filterRisk !== "all" || filterPurpose !== "all") && (
+                <button onClick={() => {setSearchQuery(""); setFilterRisk("all"); setFilterPurpose("all");}}
+                  style={{
+                    padding: "8px 14px", background: "#fde8e8", color: "#c0392b",
+                    border: "1px solid #f5c6cb", borderRadius: 8, fontSize: 12, fontWeight: 600,
+                    cursor: "pointer", fontFamily: "inherit"
+                  }}>
+                  ✕ Clear filters
+                </button>
+              )}
+            </div>
           </div>
           {activeLoans.length === 0 ? (
             <div style={{padding: "60px 24px", textAlign:"center", color:"#8892a4", fontSize: 14}}>
@@ -398,7 +656,26 @@ export default function App() {
                 </tr>
               </thead>
               <tbody>
-                {activeLoans.map(b => {
+                {(() => {
+                  const filtered = activeLoans.filter(b => {
+                    const r = results[b.id] || { risk_level: b.risk_level };
+                    const matchSearch = !searchQuery ||
+                      b.borrower_name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                      b.borrower_email?.toLowerCase().includes(searchQuery.toLowerCase());
+                    const matchRisk = filterRisk === "all" || r.risk_level === filterRisk;
+                    const matchPurpose = filterPurpose === "all" || b.purpose === filterPurpose;
+                    return matchSearch && matchRisk && matchPurpose;
+                  });
+                  if (filtered.length === 0) {
+                    return (
+                      <tr>
+                        <td colSpan="8" style={{padding: "40px 24px", textAlign: "center", color: "#8892a4", fontSize: 13}}>
+                          No loans match your filters
+                        </td>
+                      </tr>
+                    );
+                  }
+                  return filtered.map(b => {
                   const r = results[b.id] || { risk_score: b.risk_score, risk_level: b.risk_level, reasons: [] };
                   const colors = RISK[r?.risk_level || "UNKNOWN"];
                   const score = Math.round((r.risk_score || 0) * 100);
@@ -438,7 +715,8 @@ export default function App() {
                       </td>
                     </tr>
                   );
-                })}
+                });
+              })()}
               </tbody>
             </table>
           )}
@@ -492,6 +770,112 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {tickets.filter(t => t.status !== "closed").length > 0 && (
+          <div className="table-card" style={{marginBottom: 20}}>
+            <div className="table-header">
+              <span className="table-title">🎫 Support Tickets</span>
+              <span className="table-count" style={{background:"#fde8e8", color:"#c0392b"}}>
+                {tickets.filter(t => t.status === "open").length} open · {tickets.length} total
+              </span>
+            </div>
+            <div style={{padding: 0}}>
+            {tickets.filter(t => t.status !== "closed").map(t => {
+                const priColor = t.priority === "urgent" ? {bg:"#fde8e8", color:"#c0392b"}
+                              : t.priority === "high" ? {bg:"#fff3cd", color:"#856404"}
+                              : {bg:"#cfe2ff", color:"#084298"};
+                const statColor = t.status === "open" ? {bg:"#fff3cd", color:"#856404"}
+                              : t.status === "in_progress" ? {bg:"#cfe2ff", color:"#084298"}
+                              : t.status === "reopened" ? {bg:"#fff3cd", color:"#856404"}
+                              : {bg:"#d4f5e2", color:"#1a7a3c"};
+                const needsResponse = t.status === "open" || t.status === "in_progress" || t.status === "reopened";
+                return (
+                  <div key={t.id} style={{padding:"18px 24px", borderBottom:"1px solid #f0f2f7"}}>
+                    <div style={{display:"flex", alignItems:"flex-start", gap:12, marginBottom: 12}}>
+                      <div style={{flex: 1}}>
+                        <div style={{fontSize: 14, fontWeight: 600, color:"#1a1a2e", marginBottom: 3}}>
+                          {t.subject}
+                        </div>
+                        <div style={{fontSize: 12, color:"#8892a4"}}>
+                          #{t.id} · {t.borrower_name} ({t.borrower_email}) · {t.category} · {new Date(t.created_at).toLocaleString("en-IN")}
+                        </div>
+                      </div>
+                      <div style={{display:"flex", gap: 6, flexShrink: 0}}>
+                        <span className="risk-badge" style={{background: priColor.bg, color: priColor.color, fontSize: 10}}>
+                          {t.priority.toUpperCase()}
+                        </span>
+                        <span className="risk-badge" style={{background: statColor.bg, color: statColor.color, fontSize: 10}}>
+                          {t.status.replace("_", " ").toUpperCase()}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Conversation thread */}
+                    <div style={{
+                      background:"#fafbfc", border:"1px solid #f0f2f7", borderRadius: 10,
+                      padding: 12, marginBottom: needsResponse ? 12 : 0
+                    }}>
+                      {(t.thread || []).map(m => (
+                        <div key={m.id} style={{
+                          display: "flex",
+                          justifyContent: m.sender_role === "analyst" ? "flex-end" : "flex-start",
+                          marginBottom: 8
+                        }}>
+                          <div style={{
+                            maxWidth: "78%",
+                            padding: "9px 13px",
+                            borderRadius: 12,
+                            fontSize: 13,
+                            lineHeight: 1.5,
+                            background: m.sender_role === "analyst" ? "#1a1a2e" : "#fff",
+                            color: m.sender_role === "analyst" ? "#fff" : "#1a1a2e",
+                            border: m.sender_role === "borrower" ? "1px solid #e0e4ec" : "none"
+                          }}>
+                            {m.message}
+                            <div style={{fontSize: 10, opacity: 0.7, marginTop: 4}}>
+                              {m.sender_role === "analyst" ? "You" : t.borrower_name.split(" ")[0]} · {new Date(m.created_at).toLocaleString("en-IN", {day:"numeric", month:"short", hour:"2-digit", minute:"2-digit"})}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {needsResponse && (
+                      <div>
+                        <textarea
+                          value={ticketResponse[t.id] || ""}
+                          onChange={e => setTicketResponse({...ticketResponse, [t.id]: e.target.value})}
+                          placeholder={t.status === "reopened" ? "Borrower replied — type your follow-up..." : "Type your response (minimum 10 characters)..."}
+                          style={{
+                            width: "100%", padding: "10px 12px", border: "1px solid #e0e4ec",
+                            borderRadius: 8, fontSize: 13, fontFamily: "inherit",
+                            minHeight: 60, resize: "vertical", marginBottom: 8
+                          }} />
+                        <div style={{display:"flex", gap: 10, justifyContent:"flex-end"}}>
+                          <button onClick={() => handleTicketRespond(t.id, "in_progress")}
+                            disabled={respondingTo === t.id}
+                            style={{padding:"8px 16px", background:"#fff", color:"#084298",
+                              border:"1px solid #cfe2ff", borderRadius: 8, fontSize: 13, fontWeight: 600,
+                              cursor:"pointer", fontFamily:"inherit"}}>
+                            Send & Keep Open
+                          </button>
+                          <button onClick={() => handleTicketRespond(t.id, "resolved")}
+                            disabled={respondingTo === t.id}
+                            style={{padding:"8px 16px", background:"#1a7a3c", color:"#fff",
+                              border:"none", borderRadius: 8, fontSize: 13, fontWeight: 600,
+                              cursor:"pointer", fontFamily:"inherit"}}>
+                            {respondingTo === t.id ? "..." : "Send & Resolve"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {selectedBorrower && selectedResult && (
           <div className="detail-panel">
             <div className="detail-header">
@@ -589,9 +973,159 @@ export default function App() {
                 </div>
               )}
             </div>
+            </div>
+        )}
+
+        {restructureModal && (
+          <div style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            zIndex: 1000, padding: 20
+          }} onClick={() => { setRestructureModal(null); setRestructureSim(null); }}>
+            <div style={{
+              background: "#fff", borderRadius: 16, padding: 28,
+              maxWidth: 580, width: "100%", maxHeight: "92vh", overflowY: "auto",
+              fontFamily: "DM Sans, sans-serif"
+            }} onClick={e => e.stopPropagation()}>
+              <div style={{display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18}}>
+                <div>
+                  <div style={{fontSize: 18, fontWeight: 700, color: "#1a1a2e"}}>🔄 Restructure Loan</div>
+                  <div style={{fontSize: 12, color: "#8892a4", marginTop: 4}}>
+                    {restructureModal.loan.borrower_name} · Loan #{restructureModal.loan.loan_id} ({restructureModal.loan.purpose})
+                  </div>
+                </div>
+                <button onClick={() => { setRestructureModal(null); setRestructureSim(null); }}
+                  style={{background: "none", border: "none", fontSize: 24, cursor: "pointer", color: "#8892a4"}}>×</button>
+              </div>
+
+              <div style={{background: "#f0f7ff", border: "1px solid #b3d4ff", borderRadius: 10, padding: 14, marginBottom: 18, fontSize: 12, color: "#2c5282", lineHeight: 1.5}}>
+                💡 Help a struggling borrower by extending tenure or lowering interest. EMI drops, but they pay slightly more total interest. Better than default.
+              </div>
+
+              {/* Tenure slider */}
+              <div style={{marginBottom: 18}}>
+                <div style={{display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8}}>
+                  <label style={{fontSize: 13, fontWeight: 600, color: "#1a1a2e"}}>Extend tenure by</label>
+                  <span style={{fontSize: 14, fontWeight: 700, color: "#1a7a3c", fontFamily: "DM Mono, monospace"}}>
+                    +{restructureForm.extend_months} months
+                  </span>
+                </div>
+                <input type="range" min="0" max="36" step="3"
+                  value={restructureForm.extend_months}
+                  onChange={e => {
+                    const v = parseInt(e.target.value);
+                    setRestructureForm({...restructureForm, extend_months: v});
+                    runSimulation(restructureModal.loan.loan_id, v, restructureForm.rate_reduction);
+                  }}
+                  style={{width: "100%"}} />
+                <div style={{display: "flex", justifyContent: "space-between", fontSize: 10, color: "#8892a4", marginTop: 4}}>
+                  <span>No change</span><span>+18 mo</span><span>+36 mo</span>
+                </div>
+              </div>
+
+              {/* Rate slider */}
+              <div style={{marginBottom: 18}}>
+                <div style={{display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8}}>
+                  <label style={{fontSize: 13, fontWeight: 600, color: "#1a1a2e"}}>Reduce interest rate by</label>
+                  <span style={{fontSize: 14, fontWeight: 700, color: "#1a7a3c", fontFamily: "DM Mono, monospace"}}>
+                    -{restructureForm.rate_reduction}%
+                  </span>
+                </div>
+                <input type="range" min="0" max="5" step="0.25"
+                  value={restructureForm.rate_reduction}
+                  onChange={e => {
+                    const v = parseFloat(e.target.value);
+                    setRestructureForm({...restructureForm, rate_reduction: v});
+                    runSimulation(restructureModal.loan.loan_id, restructureForm.extend_months, v);
+                  }}
+                  style={{width: "100%"}} />
+                <div style={{display: "flex", justifyContent: "space-between", fontSize: 10, color: "#8892a4", marginTop: 4}}>
+                  <span>No change</span><span>-2.5%</span><span>-5%</span>
+                </div>
+              </div>
+
+              {/* Live simulation result */}
+              {restructureSim && (
+                <div style={{
+                  background: "linear-gradient(135deg, #f0fff4 0%, #d4f5e2 100%)",
+                  border: "1px solid #c3e6cb", borderRadius: 12,
+                  padding: 18, marginBottom: 16
+                }}>
+                  <div style={{fontSize: 11, fontWeight: 700, color: "#1a7a3c", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 12}}>
+                    📊 Simulation Result
+                  </div>
+                  <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14}}>
+                    <div>
+                      <div style={{fontSize: 11, color: "#8892a4", marginBottom: 4}}>BEFORE</div>
+                      <div style={{fontSize: 11, color: "#5a6378"}}>EMI: <b>₹{Math.round(restructureSim.current_emi).toLocaleString()}</b></div>
+                      <div style={{fontSize: 11, color: "#5a6378"}}>Months: <b>{restructureSim.current_remaining_months}</b></div>
+                      <div style={{fontSize: 11, color: "#5a6378"}}>Rate: <b>{restructureSim.current_rate}%</b></div>
+                    </div>
+                    <div>
+                      <div style={{fontSize: 11, color: "#1a7a3c", fontWeight: 700, marginBottom: 4}}>AFTER</div>
+                      <div style={{fontSize: 11, color: "#1a7a3c"}}>EMI: <b>₹{Math.round(restructureSim.new_emi).toLocaleString()}</b></div>
+                      <div style={{fontSize: 11, color: "#1a7a3c"}}>Months: <b>{restructureSim.new_tenure}</b></div>
+                      <div style={{fontSize: 11, color: "#1a7a3c"}}>Rate: <b>{restructureSim.new_rate}%</b></div>
+                    </div>
+                  </div>
+                  <div style={{borderTop: "1px solid #c3e6cb", paddingTop: 12}}>
+                    <div style={{fontSize: 22, fontWeight: 700, color: "#1a7a3c", fontFamily: "DM Mono, monospace"}}>
+                      ↓ ₹{Math.round(restructureSim.emi_drop).toLocaleString()} ({restructureSim.emi_drop_pct}% EMI reduction)
+                    </div>
+                    {restructureSim.extra_interest_cost > 0 && (
+                      <div style={{fontSize: 11, color: "#8a6d3b", marginTop: 6}}>
+                        ⓘ Borrower pays ₹{Math.round(restructureSim.extra_interest_cost).toLocaleString()} more total interest over life of loan
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Reason */}
+              <div style={{marginBottom: 16}}>
+                <label style={{display: "block", fontSize: 12, fontWeight: 600, color: "#5a6378", marginBottom: 6}}>
+                  Reason for restructuring
+                </label>
+                <textarea value={restructureForm.reason}
+                  onChange={e => setRestructureForm({...restructureForm, reason: e.target.value})}
+                  placeholder="e.g. Borrower showed cash flow stress with 2 partial payments. Restructuring to prevent default."
+                  style={{
+                    width: "100%", padding: "10px 12px", border: "1px solid #e0e4ec",
+                    borderRadius: 8, fontSize: 13, fontFamily: "inherit", minHeight: 70, resize: "vertical"
+                  }} />
+              </div>
+
+              <div style={{display: "flex", gap: 10, justifyContent: "flex-end"}}>
+                <button onClick={() => { setRestructureModal(null); setRestructureSim(null); }}
+                  style={{padding: "10px 18px", background: "#fff", color: "#1a1a2e",
+                    border: "1px solid #e0e4ec", borderRadius: 9, fontSize: 13, fontWeight: 600,
+                    cursor: "pointer", fontFamily: "inherit"}}>
+                  Cancel
+                </button>
+                <button onClick={applyRestructure}
+                  disabled={restructureForm.extend_months === 0 && restructureForm.rate_reduction === 0}
+                  style={{padding: "10px 18px", background: "#1a7a3c", color: "#fff",
+                    border: "none", borderRadius: 9, fontSize: 13, fontWeight: 600,
+                    cursor: "pointer", fontFamily: "inherit",
+                    opacity: (restructureForm.extend_months === 0 && restructureForm.rate_reduction === 0) ? 0.5 : 1}}>
+                  Apply Restructuring
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </div>
     </>
+  );
+}
+function Stat({ label, value }) {
+  return (
+    <div style={{
+      background: "#fafbfc", border: "1px solid #f0f2f7", borderRadius: 8,
+      padding: "8px 10px"
+    }}>
+      <div style={{fontSize: 10, color: "#8892a4", textTransform: "uppercase", letterSpacing: 0.4, fontWeight: 600, marginBottom: 2}}>{label}</div>
+      <div style={{fontSize: 13, fontWeight: 600, color: "#1a1a2e", fontFamily: "DM Mono, monospace"}}>{value}</div>
+    </div>
   );
 }

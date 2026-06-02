@@ -7,7 +7,9 @@ import Signup from "./Signup";
 import Portal from "./Portal";
 import ApplyLoan from "./ApplyLoan";
 import LoanDetails from "./LoanDetails";
-
+import AffordabilityCoach from "./AffordabilityCoach";
+import FAQ from "./FAQ";
+import Support from "./Support";
 const isLoggedIn = () => !!localStorage.getItem("token");
 const getRole = () => {
   try {
@@ -37,9 +39,12 @@ root.render(
       <Route path="/portal" element={<ProtectedRoute><Portal /></ProtectedRoute>} />
       <Route path="/apply" element={<ProtectedRoute><ApplyLoan /></ProtectedRoute>} />
       <Route path="/loan/:loanId" element={<ProtectedRoute><LoanDetails /></ProtectedRoute>} />
+      <Route path="/affordability" element={<ProtectedRoute><AffordabilityCoach /></ProtectedRoute>} />
       <Route path="/dashboard" element={<ProtectedRoute requireRole="analyst"><App /></ProtectedRoute>} />
       <Route path="/" element={<Navigate to="/portal" replace />} />
       <Route path="*" element={<Navigate to="/portal" replace />} />
+      <Route path="/faq" element={<ProtectedRoute><FAQ /></ProtectedRoute>} />
+      <Route path="/support" element={<ProtectedRoute><Support /></ProtectedRoute>} />
     </Routes>
   </BrowserRouter>
 );

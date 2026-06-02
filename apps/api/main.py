@@ -7,12 +7,26 @@ from dotenv import load_dotenv
 load_dotenv()
 from datetime import datetime
 import httpx
-
-from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, ForeignKey, Boolean, func
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from pymongo import MongoClient
 from apps.api.auth import hash_password, verify_password, create_access_token, get_current_user
+from apps.api.email_service import (
+    send_email,
+    loan_approved_email,
+    loan_rejected_email,
+    loan_disbursed_email,
+    payment_success_email,
+    deferral_decision_email
+)
 import razorpay
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.lib import colors
+from reportlab.lib.units import mm
+from fastapi.responses import StreamingResponse
+import io
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 model = joblib.load(os.path.join(BASE_DIR, "models/xgboost_v1.joblib"))
 explainer = joblib.load(os.path.join(BASE_DIR, "models/shap_explainer.joblib"))
@@ -44,6 +58,10 @@ class User(Base):
     name = Column(String, nullable=False)
     hashed_password = Column(String, nullable=False)
     role = Column(String, default="borrower")
+    gender = Column(String, nullable=True)  # male, female, other
+    date_of_birth = Column(String, nullable=True)  # YYYY-MM-DD
+    pan_number = Column(String, nullable=True)
+    employment_type = Column(String, nullable=True)  # salaried, self_employed, business_owner, retired
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -53,17 +71,24 @@ class Loan(Base):
     user_id = Column(Integer, ForeignKey("users.id"))
     loan_amnt = Column(Float)
     term = Column(Integer)
-    int_rate = Column(Float)
+    int_rate = Column(Float)  # proposed rate
+    final_int_rate = Column(Float, nullable=True)  # analyst-adjusted (for business loans)
     installment = Column(Float)
     grade = Column(Integer)
     annual_inc = Column(Float)
     dti = Column(Float)
-    fico_avg = Column(Integer)
+    cibil_score = Column(Integer)  # 300-900 (Indian credit bureau)
+    fico_avg = Column(Integer)  # kept for ML model compat (we'll convert internally)
     emp_length = Column(Integer)
-    purpose = Column(String, default="personal")  # personal, home, car, education, business, medical
+    purpose = Column(String, default="personal")
+    collateral_type = Column(String, nullable=True)  # property, gold, fd, vehicle, none
+    collateral_value = Column(Float, nullable=True)
+    collateral_description = Column(String, nullable=True)
+    emi_adjustment = Column(Float, default=0)
+    carryover_balance = Column(Float, default=0)
     risk_score = Column(Float, default=0)
     risk_level = Column(String, default="UNKNOWN")
-    status = Column(String, default="pending")  # pending, approved, rejected, disbursed, active, paid, defaulted
+    status = Column(String, default="pending")
     rejection_reason = Column(String, nullable=True)
     reviewed_by = Column(Integer, nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
@@ -82,18 +107,47 @@ class Prediction(Base):
     dti = Column(Float)
     fico_avg = Column(Float)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Payment(Base):
     __tablename__ = "payments"
     id = Column(Integer, primary_key=True, index=True)
     loan_id = Column(Integer, ForeignKey("loans.id"))
     user_id = Column(Integer, ForeignKey("users.id"))
     amount = Column(Float)
+    payment_type = Column(String, default="full")  # full, partial, penalty
+    expected_emi = Column(Float, nullable=True)  # what was expected
+    late_fee = Column(Float, default=0)  # penalty included if late
+    days_late = Column(Integer, default=0)
     razorpay_order_id = Column(String, nullable=True)
     razorpay_payment_id = Column(String, nullable=True)
     razorpay_signature = Column(String, nullable=True)
-    status = Column(String, default="created")  # created, paid, failed
+    status = Column(String, default="created")
     created_at = Column(DateTime, default=datetime.utcnow)
     paid_at = Column(DateTime, nullable=True)
+
+class EMISchedule(Base):
+    __tablename__ = "emi_schedule"
+    id = Column(Integer, primary_key=True, index=True)
+    loan_id = Column(Integer, ForeignKey("loans.id"))
+    due_date = Column(DateTime)
+    emi_number = Column(Integer)  # 1st EMI, 2nd EMI, etc.
+    expected_amount = Column(Float)
+    paid_amount = Column(Float, default=0)
+    status = Column(String, default="pending")  # pending, paid, partial, overdue
+    late_fee = Column(Float, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    title = Column(String)
+    message = Column(String)
+    type = Column(String, default="info")  # info, success, warning, payment, approval
+    is_read = Column(Boolean, default=False)
+    link = Column(String, nullable=True)  # optional link to a loan, etc.
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class DeferralRequest(Base):
     __tablename__ = "deferral_requests"
@@ -102,11 +156,33 @@ class DeferralRequest(Base):
     user_id = Column(Integer, ForeignKey("users.id"))
     reason = Column(String)
     requested_months = Column(Integer, default=1)
-    status = Column(String, default="pending")  # pending, approved, rejected
+    status = Column(String, default="pending")
     analyst_note = Column(String, nullable=True)
     reviewed_by = Column(Integer, nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+class TicketMessage(Base):
+    __tablename__ = "ticket_messages"
+    id = Column(Integer, primary_key=True, index=True)
+    ticket_id = Column(Integer, ForeignKey("support_tickets.id"))
+    sender_id = Column(Integer, ForeignKey("users.id"))
+    sender_role = Column(String, default="borrower")  # borrower or analyst
+    message = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+class SupportTicket(Base):
+    __tablename__ = "support_tickets"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    subject = Column(String, nullable=False)
+    message = Column(String, nullable=False)
+    category = Column(String, default="general")  # general, payment, technical, account, complaint
+    priority = Column(String, default="normal")  # low, normal, high, urgent
+    status = Column(String, default="open")  # open, in_progress, resolved, closed
+    response = Column(String, nullable=True)  # analyst's reply
+    responded_by = Column(Integer, nullable=True)
+    responded_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    user = relationship("User")
 Base.metadata.create_all(bind=engine)
 
 MONGO_URL = os.getenv("MONGO_URL", "mongodb://loansense:loansense123@localhost:27017/loansense_db?authSource=admin")
@@ -268,6 +344,7 @@ RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "")
 razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)) if RAZORPAY_KEY_ID else None
 
+
 @app.post("/recommend")
 async def recommend(data: dict):
     borrower_name = data.get("name", "Borrower")
@@ -325,7 +402,79 @@ No other text, just the JSON array."""
     except Exception as e:
         return {"error": str(e)}
 
+@app.post("/chat-support")
+def chat_support(data: dict, current_user: dict = Depends(get_current_user)):
+    """AI chatbot for borrower questions about LoanSense"""
+    if not OPENROUTER_API_KEY:
+        return {"error": "AI not configured"}
 
+    user_message = (data.get("message") or "").strip()
+    if not user_message:
+        return {"error": "Empty message"}
+    if len(user_message) > 500:
+        return {"error": "Message too long (500 chars max)"}
+
+    history = data.get("history", [])  # [{role, content}, ...]
+
+    # Pull a bit of user context so answers can reference their loans
+    session = Session()
+    try:
+        user = session.query(User).filter(User.id == current_user["user_id"]).first()
+        my_loans = session.query(Loan).filter(Loan.user_id == current_user["user_id"]).all()
+        loan_summary = []
+        for l in my_loans:
+            loan_summary.append(
+                f"- Loan #{l.id}: {l.purpose}, INR {l.loan_amnt:,.0f}, "
+                f"{l.term} months at {l.int_rate}%, status: {l.status}, EMI INR {l.installment:,.0f}"
+            )
+        loans_text = "\n".join(loan_summary) if loan_summary else "No loans yet."
+        user_name = user.name if user else "the user"
+    finally:
+        session.close()
+
+    system_prompt = f"""You are the LoanSense Support Assistant — a helpful, concise AI for an Indian lending platform.
+
+You're talking to {user_name}. Their current loans:
+{loans_text}
+
+Your job:
+- Answer questions about LoanSense features: loan applications, CIBIL-based rates, partial EMI, carry-over re-amortization, late fees (₹500 + 2%/week capped at 10% EMI), deferrals (1-6 months), FOAIR-based affordability, gender/senior concessions, gold/home/car/business/medical/personal/education loans.
+- If asked about their specific loan, use the loan summary above.
+- Keep answers under 100 words. Be friendly but direct. Use Indian rupees (INR) and Indian banking terminology.
+- If the question is outside LoanSense (general finance, other banks, weather, etc.), politely redirect: "I can only help with LoanSense — for that you'd need to check elsewhere."
+- If the user seems distressed about repayments, gently suggest the deferral option or the smart partial payment flow.
+- Never recommend competitors. Never give legal or tax advice. If asked, suggest they consult a CA or lawyer.
+- Always be honest — if you don't know, say so."""
+
+    messages = [{"role": "system", "content": system_prompt}]
+    # Keep last 6 history turns to stay within context limits
+    for h in history[-6:]:
+        if h.get("role") in ("user", "assistant") and h.get("content"):
+            messages.append({"role": h["role"], "content": h["content"][:500]})
+    messages.append({"role": "user", "content": user_message})
+
+    try:
+        with httpx.Client(timeout=30) as client:
+            resp = client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "openrouter/free",
+                    "messages": messages,
+                    "max_tokens": 400,
+                    "temperature": 0.4
+                }
+            )
+            if resp.status_code != 200:
+                return {"error": "AI service unavailable"}
+            result = resp.json()
+            reply = result["choices"][0]["message"]["content"].strip()
+            return {"reply": reply}
+    except Exception as e:
+        return {"error": "Could not reach AI service"}
 # ============== AUTH ENDPOINTS ==============
 
 @app.post("/signup")
@@ -430,16 +579,243 @@ def get_my_loans(current_user: dict = Depends(get_current_user)):
     return result
 
 
-# Loan type configurations
+# Indian bank interest rates (based on HDFC/SBI/ICICI 2025-26 rates)
+# base_rate = what an average borrower with 700+ CIBIL gets
+# CIBIL-based slabs adjust this
 LOAN_TYPES = {
-    "personal": {"min": 10000, "max": 500000, "rate_range": (10, 18), "max_tenure": 60, "risk_multiplier": 1.0},
-    "home": {"min": 500000, "max": 10000000, "rate_range": (7, 11), "max_tenure": 240, "risk_multiplier": 0.7},
-    "car": {"min": 100000, "max": 2000000, "rate_range": (8, 14), "max_tenure": 84, "risk_multiplier": 0.85},
-    "education": {"min": 50000, "max": 2000000, "rate_range": (8, 13), "max_tenure": 120, "risk_multiplier": 0.9},
-    "business": {"min": 100000, "max": 5000000, "rate_range": (11, 20), "max_tenure": 84, "risk_multiplier": 1.2},
-    "medical": {"min": 25000, "max": 1500000, "rate_range": (10, 16), "max_tenure": 60, "risk_multiplier": 0.95},
+    "personal": {
+        "min": 10000, "max": 5000000, "max_tenure": 84, "risk_multiplier": 1.0,
+        "base_rate": 13.5, "rate_type": "fixed",
+        "description": "Quick funds for any personal need",
+        "collateral_required": False
+    },
+    "home": {
+        "min": 500000, "max": 150000000, "max_tenure": 360, "risk_multiplier": 0.7,
+        "base_rate": 9.0, "rate_type": "fixed",
+        "description": "Buy, build, or renovate your home",
+        "collateral_required": True,
+        "collateral_type": "property"
+    },
+    "car": {
+        "min": 100000, "max": 20000000, "max_tenure": 96, "risk_multiplier": 0.85,
+        "base_rate": 10.5, "rate_type": "fixed",
+        "description": "New or used vehicle",
+        "collateral_required": True,
+        "collateral_type": "vehicle"
+    },
+    "education": {
+        "min": 50000, "max": 20000000, "max_tenure": 180, "risk_multiplier": 0.9,
+        "base_rate": 10.0, "rate_type": "negotiable",
+        "description": "Indian or foreign education",
+        "collateral_required": False
+    },
+    "business": {
+        "min": 100000, "max": 100000000, "max_tenure": 120, "risk_multiplier": 1.2,
+        "base_rate": 15.0, "rate_type": "negotiable",
+        "description": "Working capital or expansion",
+        "collateral_required": True,
+        "collateral_type": "property_or_gold"
+    },
+    "medical": {
+        "min": 25000, "max": 10000000, "max_tenure": 72, "risk_multiplier": 0.95,
+        "base_rate": 12.5, "rate_type": "fixed",
+        "description": "Healthcare emergencies",
+        "collateral_required": False
+    },
+    "gold": {
+        "min": 10000, "max": 5000000, "max_tenure": 36, "risk_multiplier": 0.6,
+        "base_rate": 9.5, "rate_type": "fixed",
+        "description": "Loan against your gold jewelry/coins",
+        "collateral_required": True,
+        "collateral_type": "gold"
+    },
 }
 
+
+def calculate_interest_rate(purpose: str, cibil_score: int, gender: str = None,
+                             age: int = None, has_collateral: bool = False) -> dict:
+    """
+    Calculate interest rate based on Indian banking norms:
+    - CIBIL score slabs
+    - Women concession (0.05%)
+    - Senior citizen concession (0.25% for 60+)
+    - Collateral discount (0.50% for secured loans with property/gold)
+    """
+    cfg = LOAN_TYPES.get(purpose, LOAN_TYPES["personal"])
+    base = cfg["base_rate"]
+    breakdown = {"base_rate": base, "adjustments": []}
+
+    # CIBIL slab adjustment
+    if cibil_score >= 800:
+        cibil_adj = -0.50
+        breakdown["adjustments"].append({"factor": "Excellent CIBIL (800+)", "value": -0.50})
+    elif cibil_score >= 750:
+        cibil_adj = -0.25
+        breakdown["adjustments"].append({"factor": "Very Good CIBIL (750-799)", "value": -0.25})
+    elif cibil_score >= 700:
+        cibil_adj = 0
+        breakdown["adjustments"].append({"factor": "Good CIBIL (700-749)", "value": 0})
+    elif cibil_score >= 650:
+        cibil_adj = 1.0
+        breakdown["adjustments"].append({"factor": "Fair CIBIL (650-699)", "value": +1.0})
+    elif cibil_score >= 600:
+        cibil_adj = 2.5
+        breakdown["adjustments"].append({"factor": "Below Average CIBIL (600-649)", "value": +2.5})
+    else:
+        cibil_adj = 4.0
+        breakdown["adjustments"].append({"factor": "Poor CIBIL (<600)", "value": +4.0})
+
+    final_rate = base + cibil_adj
+
+    # Women concession (HDFC, SBI, ICICI all offer this on home/car loans)
+    if gender and gender.lower() == "female" and purpose in ["home", "car"]:
+        final_rate -= 0.05
+        breakdown["adjustments"].append({"factor": "Women borrower concession", "value": -0.05})
+
+    # Senior citizen concession (60+)
+    if age and age >= 60:
+        final_rate -= 0.25
+        breakdown["adjustments"].append({"factor": "Senior citizen concession (60+)", "value": -0.25})
+
+    # Collateral discount for secured loans
+    if has_collateral and purpose == "business":
+        final_rate -= 0.50
+        breakdown["adjustments"].append({"factor": "Collateral provided", "value": -0.50})
+
+    # Floor: rates can't go below regulatory minimums
+    final_rate = max(final_rate, 7.0)
+
+    breakdown["final_rate"] = round(final_rate, 2)
+    breakdown["rate_type"] = cfg["rate_type"]
+
+    return breakdown
+
+
+@app.post("/calculate-rate")
+def calculate_rate_preview(data: dict, current_user: dict = Depends(get_current_user)):
+    """Preview the interest rate before submitting application"""
+    purpose = data.get("purpose", "personal")
+    cibil_score = int(data.get("cibil_score", 700))
+    has_collateral = bool(data.get("has_collateral", False))
+
+    # Get user's gender and age from profile
+    session = Session()
+    user = session.query(User).filter(User.id == current_user["user_id"]).first()
+    gender = user.gender if user else None
+    age = None
+    if user and user.date_of_birth:
+        try:
+            dob = datetime.strptime(user.date_of_birth, "%Y-%m-%d")
+            age = (datetime.now() - dob).days // 365
+        except Exception:
+            pass
+    session.close()
+
+    breakdown = calculate_interest_rate(purpose, cibil_score, gender, age, has_collateral)
+    return breakdown
+
+# ============== AI AFFORDABILITY COACH ==============
+
+@app.post("/affordability-check")
+def affordability_check(data: dict, current_user: dict = Depends(get_current_user)):
+    """
+    Calculate how much EMI the borrower can safely afford based on FOAIR norms.
+    Optionally checks if a planned loan is within safe limits.
+    """
+    annual_income = float(data.get("annual_income", 0))
+    monthly_essentials = float(data.get("monthly_essentials", 0))  # rent, food, utilities
+    existing_emis = float(data.get("existing_emis", 0))
+    dependents = int(data.get("dependents", 0))
+
+    # Optional — for checking a specific loan
+    planned_loan_amount = float(data.get("planned_loan_amount", 0))
+    planned_tenure = int(data.get("planned_tenure", 0))
+    planned_rate = float(data.get("planned_rate", 0))
+
+    if annual_income <= 0:
+        return {"error": "Annual income is required"}
+
+    monthly_income = annual_income / 12
+
+    # Total essential outgoings
+    total_essentials = monthly_essentials + existing_emis
+    # Add ₹3000/dependent as estimated additional essential
+    total_essentials += dependents * 3000
+
+    free_income = max(0, monthly_income - total_essentials)
+
+    # FOAIR norms (RBI / Indian bank guidelines):
+    # - Total EMI obligations <= 40% of monthly income (safe)
+    # - 40-50% = caution zone
+    # - >50% = high risk / banks usually decline
+    max_total_emi = monthly_income * 0.50  # absolute ceiling
+    safe_total_emi = monthly_income * 0.40  # safe zone
+    caution_total_emi = monthly_income * 0.45  # caution zone
+
+    # What's available for NEW EMI (subtracting existing EMIs)
+    safe_new_emi = max(0, safe_total_emi - existing_emis)
+    caution_new_emi = max(0, caution_total_emi - existing_emis)
+    max_new_emi = max(0, max_total_emi - existing_emis)
+
+    # Build advice
+    advice = {
+        "monthly_income": round(monthly_income, 2),
+        "free_income": round(free_income, 2),
+        "total_essentials": round(total_essentials, 2),
+        "existing_emis": round(existing_emis, 2),
+        "current_foair_pct": round((existing_emis / monthly_income) * 100, 1) if monthly_income > 0 else 0,
+        "safe_new_emi": round(safe_new_emi, 2),
+        "caution_new_emi": round(caution_new_emi, 2),
+        "max_new_emi": round(max_new_emi, 2),
+        "safe_zone_label": "✅ Safe",
+        "caution_zone_label": "⚠ Caution",
+        "danger_zone_label": "🚫 Risky",
+    }
+
+    # If a specific loan is being checked, evaluate it
+    if planned_loan_amount > 0 and planned_tenure > 0 and planned_rate > 0:
+        r = planned_rate / 100 / 12
+        n = planned_tenure
+        planned_emi = (planned_loan_amount * r * (1 + r) ** n) / ((1 + r) ** n - 1) if r > 0 else planned_loan_amount / n
+        planned_emi = round(planned_emi, 2)
+        new_total_emi = existing_emis + planned_emi
+        new_foair_pct = (new_total_emi / monthly_income) * 100 if monthly_income > 0 else 100
+
+        if planned_emi <= safe_new_emi:
+            verdict = "safe"
+            verdict_title = "✅ This loan is safe for you"
+            verdict_msg = f"At ₹{planned_emi:,.0f}/month, you'll comfortably manage this loan along with your other commitments."
+        elif planned_emi <= caution_new_emi:
+            verdict = "caution"
+            verdict_title = "⚠ Manageable but tight"
+            verdict_msg = f"At ₹{planned_emi:,.0f}/month, you'll be at {new_foair_pct:.0f}% of your income. Most banks consider this borderline — proceed only if your income is stable."
+        elif planned_emi <= max_new_emi:
+            verdict = "risky"
+            verdict_title = "🚨 High risk — reconsider"
+            verdict_msg = f"At ₹{planned_emi:,.0f}/month, you'd use {new_foair_pct:.0f}% of your income for EMIs. This leaves very little for emergencies. Consider a smaller loan."
+        else:
+            verdict = "unaffordable"
+            verdict_title = "🛑 Beyond safe limits"
+            verdict_msg = f"This loan's EMI (₹{planned_emi:,.0f}) exceeds {new_foair_pct:.0f}% of your monthly income. Banks rarely approve this, and even if approved, defaults become very likely."
+
+        # Suggest a safer alternative
+        safer_loan_amount = 0
+        if safe_new_emi > 0 and r > 0:
+            safer_loan_amount = (safe_new_emi * ((1 + r) ** n - 1)) / (r * (1 + r) ** n)
+            safer_loan_amount = round(safer_loan_amount, -3)  # round to nearest ₹1000
+
+        advice["planned_check"] = {
+            "planned_emi": planned_emi,
+            "new_total_emi": round(new_total_emi, 2),
+            "new_foair_pct": round(new_foair_pct, 1),
+            "verdict": verdict,
+            "verdict_title": verdict_title,
+            "verdict_msg": verdict_msg,
+            "safer_loan_amount": safer_loan_amount,
+            "safer_emi": round(safe_new_emi, 2)
+        }
+
+    return advice
 
 @app.get("/loan-types")
 def get_loan_types():
@@ -448,7 +824,7 @@ def get_loan_types():
 
 @app.post("/apply-loan")
 def apply_loan(data: dict, current_user: dict = Depends(get_current_user)):
-    """Borrower submits loan application — goes to PENDING status awaiting bank approval"""
+    """Borrower submits loan application — interest rate is auto-calculated"""
     try:
         purpose = data.get("purpose", "personal")
         if purpose not in LOAN_TYPES:
@@ -456,20 +832,45 @@ def apply_loan(data: dict, current_user: dict = Depends(get_current_user)):
 
         loan_amnt = float(data.get("loan_amnt", 0))
         term = int(data.get("term", 36))
-        int_rate = float(data.get("int_rate", 12.0))
+        cibil_score = int(data.get("cibil_score", 700))
 
-        # Validate against loan type limits
         cfg = LOAN_TYPES[purpose]
         if loan_amnt < cfg["min"] or loan_amnt > cfg["max"]:
             return {"error": f"Loan amount for {purpose} loans must be between ₹{cfg['min']:,} and ₹{cfg['max']:,}"}
         if term > cfg["max_tenure"]:
             return {"error": f"Maximum tenure for {purpose} loans is {cfg['max_tenure']} months"}
 
-        # Calculate EMI properly: P*r*(1+r)^n / ((1+r)^n - 1)
+        # Collateral info
+        collateral_type = data.get("collateral_type", None)
+        collateral_value = float(data.get("collateral_value", 0)) if data.get("collateral_value") else None
+        collateral_description = data.get("collateral_description", None)
+        has_collateral = collateral_type and collateral_type != "none"
+
+        if cfg["collateral_required"] and not has_collateral:
+            return {"error": f"{purpose.title()} loans require collateral. Please provide details."}
+
+        # Get user profile for rate calculation
+        session = Session()
+        user = session.query(User).filter(User.id == current_user["user_id"]).first()
+        gender = user.gender if user else None
+        age = None
+        if user and user.date_of_birth:
+            try:
+                dob = datetime.strptime(user.date_of_birth, "%Y-%m-%d")
+                age = (datetime.now() - dob).days // 365
+            except Exception:
+                pass
+
+        # AUTO-CALCULATE interest rate (no manual input!)
+        rate_breakdown = calculate_interest_rate(purpose, cibil_score, gender, age, has_collateral)
+        int_rate = rate_breakdown["final_rate"]
+
+        # Calculate EMI
         r = int_rate / 100 / 12
         n = term
         emi = (loan_amnt * r * (1 + r) ** n) / ((1 + r) ** n - 1) if r > 0 else loan_amnt / n
 
+        # Run ML risk prediction
         loan_features = {
             "loan_amnt": loan_amnt,
             "term": term,
@@ -479,12 +880,11 @@ def apply_loan(data: dict, current_user: dict = Depends(get_current_user)):
             "emp_length": int(data.get("emp_length", 1)),
             "annual_inc": float(data.get("annual_inc", 50000)),
             "dti": float(data.get("dti", 15)),
-            "fico_range_low": int(data.get("fico_avg", 700)) - 2,
-            "fico_range_high": int(data.get("fico_avg", 700)) + 2,
-            "fico_avg": int(data.get("fico_avg", 700)),
+            "fico_range_low": cibil_score - 2,
+            "fico_range_high": cibil_score + 2,
+            "fico_avg": cibil_score,
         }
 
-        # Get base risk from XGBoost
         df = pd.DataFrame([loan_features])
         for col in feature_names:
             if col not in df.columns:
@@ -492,12 +892,12 @@ def apply_loan(data: dict, current_user: dict = Depends(get_current_user)):
         df = df[feature_names]
         base_risk = float(model.predict_proba(df)[:, 1][0])
 
-        # Adjust risk by loan type
         adjusted_risk = min(base_risk * cfg["risk_multiplier"], 1.0)
+        # Collateral reduces effective risk
+        if has_collateral:
+            adjusted_risk *= 0.8
         risk_level = "HIGH" if adjusted_risk >= 0.6 else "MEDIUM" if adjusted_risk >= 0.3 else "LOW"
 
-        # Save with status = pending (awaiting bank approval)
-        session = Session()
         loan = Loan(
             user_id=current_user["user_id"],
             loan_amnt=loan_amnt,
@@ -507,9 +907,13 @@ def apply_loan(data: dict, current_user: dict = Depends(get_current_user)):
             grade=loan_features["grade"],
             annual_inc=loan_features["annual_inc"],
             dti=loan_features["dti"],
-            fico_avg=loan_features["fico_avg"],
+            cibil_score=cibil_score,
+            fico_avg=cibil_score,  # for ML compat
             emp_length=loan_features["emp_length"],
             purpose=purpose,
+            collateral_type=collateral_type if has_collateral else None,
+            collateral_value=collateral_value if has_collateral else None,
+            collateral_description=collateral_description if has_collateral else None,
             risk_score=adjusted_risk,
             risk_level=risk_level,
             status="pending"
@@ -518,17 +922,29 @@ def apply_loan(data: dict, current_user: dict = Depends(get_current_user)):
         session.commit()
         session.refresh(loan)
         loan_id = loan.id
+        # Notify all analysts about the new application
+        borrower_name = user.name if user else "A borrower"
+        notify_all_analysts(
+            session,
+            "📋 New loan application",
+            f"{borrower_name} applied for a ₹{loan_amnt:,.0f} {purpose} loan (CIBIL {cibil_score})",
+            "info",
+            "/dashboard"
+        )
         session.close()
 
         return {
             "success": True,
             "loan_id": loan_id,
             "purpose": purpose,
+            "int_rate": int_rate,
+            "rate_breakdown": rate_breakdown,
             "risk_score": round(adjusted_risk, 4),
             "risk_level": risk_level,
             "installment": round(emi, 2),
             "status": "pending",
-            "message": "Application submitted! Awaiting bank approval."
+            "message": "Application submitted! Awaiting bank approval." if cfg["rate_type"] == "fixed"
+                       else "Application submitted! Final rate will be confirmed after bank review."
         }
     except Exception as e:
         return {"error": str(e)}
@@ -536,7 +952,6 @@ def apply_loan(data: dict, current_user: dict = Depends(get_current_user)):
 
 @app.get("/pending-applications")
 def get_pending_applications(current_user: dict = Depends(get_current_user)):
-    """For analysts — list all pending loan applications"""
     if current_user.get("role") != "analyst":
         return {"error": "Only analysts can view pending applications"}
 
@@ -564,9 +979,91 @@ def get_pending_applications(current_user: dict = Depends(get_current_user)):
     session.close()
     return result
 
+# ============== ANALYST DASHBOARD CHARTS ==============
+
+@app.get("/analyst/dashboard-stats")
+def analyst_dashboard_stats(current_user: dict = Depends(get_current_user)):
+    """Aggregated stats for analyst charts"""
+    if current_user.get("role") != "analyst":
+        return {"error": "Not authorized"}
+
+    session = Session()
+    try:
+        from sqlalchemy import func
+        from collections import defaultdict
+
+        # 1. Loans by purpose (active only) — for donut
+        active_loans = session.query(Loan).filter(Loan.status == "active").all()
+        by_purpose = defaultdict(lambda: {"count": 0, "total_amount": 0})
+        for l in active_loans:
+            by_purpose[l.purpose]["count"] += 1
+            by_purpose[l.purpose]["total_amount"] += l.loan_amnt
+
+        # 2. Risk distribution (active only) — for bar
+        risk_counts = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
+        for l in active_loans:
+            level = l.risk_level if l.risk_level in risk_counts else "MEDIUM"
+            risk_counts[level] += 1
+
+        # 3. Disbursement over time (last 6 months) — for line
+        from datetime import timedelta
+        today = datetime.utcnow()
+        monthly = defaultdict(lambda: {"count": 0, "amount": 0})
+        # Initialize last 6 months with zero so the chart shows continuity
+        for i in range(5, -1, -1):
+            month_dt = today - timedelta(days=30 * i)
+            key = month_dt.strftime("%b %Y")
+            monthly[key]  # touch to create
+        # Now fill from disbursed loans
+        disbursed = session.query(Loan).filter(
+            Loan.reviewed_at.isnot(None),
+            Loan.status.in_(["active", "paid"])
+        ).all()
+        cutoff = today - timedelta(days=180)
+        for l in disbursed:
+            if l.reviewed_at and l.reviewed_at >= cutoff:
+                key = l.reviewed_at.strftime("%b %Y")
+                monthly[key]["count"] += 1
+                monthly[key]["amount"] += l.loan_amnt
+
+        # 4. Quick totals
+        total_disbursed = sum(l.loan_amnt for l in active_loans)
+        pending_count = session.query(Loan).filter(Loan.status == "pending").count()
+        deferral_count = session.query(DeferralRequest).filter(
+            DeferralRequest.status == "pending"
+        ).count()
+
+        # Total interest income (sum of paid payments minus principal portion — simplified)
+        total_collected = session.query(func.sum(Payment.amount)).filter(
+            Payment.status == "paid"
+        ).scalar() or 0
+
+        session.close()
+
+        return {
+            "by_purpose": [
+                {"purpose": k, "count": v["count"], "total_amount": v["total_amount"]}
+                for k, v in by_purpose.items()
+            ],
+            "risk_distribution": risk_counts,
+            "monthly_disbursement": [
+                {"month": k, "count": v["count"], "amount": v["amount"]}
+                for k, v in monthly.items()
+            ],
+            "totals": {
+                "active_loans": len(active_loans),
+                "total_disbursed": round(total_disbursed, 2),
+                "pending_applications": pending_count,
+                "pending_deferrals": deferral_count,
+                "total_collected": round(total_collected, 2)
+            }
+        }
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
 @app.get("/approved-applications")
 def get_approved_applications(current_user: dict = Depends(get_current_user)):
-    """For analysts — list approved loans awaiting disbursement"""
     if current_user.get("role") != "analyst":
         return {"error": "Only analysts can view this"}
 
@@ -591,9 +1088,9 @@ def get_approved_applications(current_user: dict = Depends(get_current_user)):
     session.close()
     return result
 
+
 @app.get("/active-loans")
 def get_active_loans(current_user: dict = Depends(get_current_user)):
-    """For analysts — list all active (disbursed) loans for risk monitoring"""
     if current_user.get("role") != "analyst":
         return {"error": "Only analysts can view this"}
 
@@ -621,9 +1118,10 @@ def get_active_loans(current_user: dict = Depends(get_current_user)):
         })
     session.close()
     return result
+
+
 @app.post("/approve-loan/{loan_id}")
 def approve_loan(loan_id: int, current_user: dict = Depends(get_current_user)):
-    """Analyst approves a pending loan"""
     if current_user.get("role") != "analyst":
         return {"error": "Only analysts can approve loans"}
 
@@ -640,13 +1138,21 @@ def approve_loan(loan_id: int, current_user: dict = Depends(get_current_user)):
     loan.reviewed_by = current_user["user_id"]
     loan.reviewed_at = datetime.utcnow()
     session.commit()
+
+    user = session.query(User).filter(User.id == loan.user_id).first()
+    if user:
+        email = loan_approved_email(user.name, loan.purpose, loan.loan_amnt, loan.installment)
+        send_email(user.email, email["subject"], email["html"])
+        create_notification(session, user.id, "Loan Approved! 🎉",
+            f"Your {loan.purpose} loan of ₹{loan.loan_amnt:,.0f} has been approved.",
+            "approval", f"/loan/{loan.id}")
+
     session.close()
     return {"success": True, "message": "Loan approved", "loan_id": loan_id}
 
 
 @app.post("/reject-loan/{loan_id}")
 def reject_loan(loan_id: int, data: dict, current_user: dict = Depends(get_current_user)):
-    """Analyst rejects a pending loan with a reason"""
     if current_user.get("role") != "analyst":
         return {"error": "Only analysts can reject loans"}
 
@@ -662,13 +1168,21 @@ def reject_loan(loan_id: int, data: dict, current_user: dict = Depends(get_curre
     loan.reviewed_by = current_user["user_id"]
     loan.reviewed_at = datetime.utcnow()
     session.commit()
+
+    user = session.query(User).filter(User.id == loan.user_id).first()
+    if user:
+        email = loan_rejected_email(user.name, loan.purpose, loan.loan_amnt, reason)
+        send_email(user.email, email["subject"], email["html"])
+        create_notification(session, user.id, "Loan Application Update",
+            f"Your {loan.purpose} loan application was not approved this time.",
+            "warning", f"/loan/{loan.id}")
+
     session.close()
     return {"success": True, "message": "Loan rejected", "loan_id": loan_id}
 
 
 @app.post("/disburse-loan/{loan_id}")
 def disburse_loan(loan_id: int, current_user: dict = Depends(get_current_user)):
-    """Analyst marks an approved loan as disbursed (money sent to borrower)"""
     if current_user.get("role") != "analyst":
         return {"error": "Only analysts can disburse loans"}
 
@@ -683,79 +1197,26 @@ def disburse_loan(loan_id: int, current_user: dict = Depends(get_current_user)):
 
     loan.status = "active"
     session.commit()
+
+    user = session.query(User).filter(User.id == loan.user_id).first()
+    if user:
+        email = loan_disbursed_email(user.name, loan.purpose, loan.loan_amnt, loan.installment)
+        send_email(user.email, email["subject"], email["html"])
+        create_notification(session, user.id, "Funds Disbursed 💰",
+            f"₹{loan.loan_amnt:,.0f} for your {loan.purpose} loan has been disbursed.",
+            "success", f"/loan/{loan.id}")
+
     session.close()
     return {"success": True, "message": "Loan disbursed", "loan_id": loan_id}
+
+
 # ============== PAYMENT ENDPOINTS ==============
 
-@app.post("/create-payment-order/{loan_id}")
-def create_payment_order(loan_id: int, current_user: dict = Depends(get_current_user)):
-    """Create a Razorpay order for EMI payment"""
-    if not razorpay_client:
-        return {"error": "Razorpay not configured"}
 
-    session = Session()
-    try:
-        loan = session.query(Loan).filter(
-            Loan.id == loan_id,
-            Loan.user_id == current_user["user_id"]
-        ).first()
-
-        if not loan:
-            session.close()
-            return {"error": "Loan not found"}
-        if loan.status != "active":
-            session.close()
-            return {"error": "Loan is not active"}
-
-        # Cache loan details BEFORE closing session
-        installment = float(loan.installment)
-        purpose = loan.purpose
-        amount_paise = int(installment * 100)
-
-        # Create Razorpay order
-        order_data = {
-            "amount": amount_paise,
-            "currency": "INR",
-            "receipt": f"loan_{loan_id}_emi_{int(datetime.utcnow().timestamp())}",
-            "notes": {
-                "loan_id": str(loan_id),
-                "user_id": str(current_user["user_id"]),
-                "purpose": purpose
-            }
-        }
-        order = razorpay_client.order.create(data=order_data)
-
-        # Save payment record
-        payment = Payment(
-            loan_id=loan_id,
-            user_id=current_user["user_id"],
-            amount=installment,
-            razorpay_order_id=order["id"],
-            status="created"
-        )
-        session.add(payment)
-        session.commit()
-        payment_id = payment.id
-        session.close()
-
-        return {
-            "success": True,
-            "order_id": order["id"],
-            "amount": amount_paise,
-            "currency": "INR",
-            "key_id": RAZORPAY_KEY_ID,
-            "payment_id": payment_id,
-            "loan_purpose": purpose,
-            "emi_amount": installment
-        }
-    except Exception as e:
-        session.close()
-        return {"error": str(e)}
 
 
 @app.post("/verify-payment")
 def verify_payment(data: dict, current_user: dict = Depends(get_current_user)):
-    """Verify Razorpay payment after checkout success"""
     if not razorpay_client:
         return {"error": "Razorpay not configured"}
 
@@ -768,14 +1229,12 @@ def verify_payment(data: dict, current_user: dict = Depends(get_current_user)):
 
     session = Session()
     try:
-        # Verify signature
         razorpay_client.utility.verify_payment_signature({
             "razorpay_order_id": razorpay_order_id,
             "razorpay_payment_id": razorpay_payment_id,
             "razorpay_signature": razorpay_signature
         })
 
-        # Mark payment as paid
         payment = session.query(Payment).filter(
             Payment.razorpay_order_id == razorpay_order_id
         ).first()
@@ -788,9 +1247,61 @@ def verify_payment(data: dict, current_user: dict = Depends(get_current_user)):
         payment.status = "paid"
         payment.paid_at = datetime.utcnow()
         session.commit()
-        session.close()
 
-        return {"success": True, "message": "Payment verified successfully"}
+        user = session.query(User).filter(User.id == payment.user_id).first()
+        loan = session.query(Loan).filter(Loan.id == payment.loan_id).first()
+
+        carryover_msg = ""
+        if loan:
+            # Determine how much of the EXPECTED emi was actually covered
+            expected = payment.expected_emi or loan.installment
+            # The portion that goes toward the EMI (exclude late fee)
+            emi_portion = payment.amount - (payment.late_fee or 0)
+            shortfall = expected - emi_portion
+
+            if payment.payment_type == "partial" and shortfall > 0:
+                # Count how many EMIs remain (excluding this one)
+                paid_count = session.query(Payment).filter(
+                    Payment.loan_id == loan.id,
+                    Payment.status == "paid"
+                ).count()
+                remaining_months = max(loan.term - paid_count, 1)
+
+                # Add shortfall to the accumulated carryover balance
+                loan.carryover_balance = (loan.carryover_balance or 0) + shortfall
+                # Spread the TOTAL carryover across remaining months
+                loan.emi_adjustment = round(loan.carryover_balance / remaining_months, 2)
+                session.commit()
+
+                new_emi = round(loan.installment + loan.emi_adjustment, 2)
+                carryover_msg = (f"You paid ₹{emi_portion:,.0f} of ₹{expected:,.0f}. "
+                                 f"The shortfall of ₹{shortfall:,.0f} has been spread across your "
+                                 f"remaining {remaining_months} EMIs. Your new EMI is ₹{new_emi:,.0f}.")
+            elif payment.payment_type == "full" and loan.carryover_balance and loan.carryover_balance > 0:
+                # A full payment (which now includes the adjustment) reduces carryover
+                if emi_portion >= (loan.installment + loan.emi_adjustment - 1):
+                    # They paid the adjusted full EMI — reduce carryover by one installment's worth
+                    loan.carryover_balance = max(0, round(loan.carryover_balance - loan.emi_adjustment, 2))
+                    if loan.carryover_balance == 0:
+                        loan.emi_adjustment = 0
+                    session.commit()
+
+        if user and loan:
+            email = payment_success_email(user.name, payment.amount, loan.purpose)
+            send_email(user.email, email["subject"], email["html"])
+            create_notification(session, user.id, "Payment Received ✓",
+                f"Your payment of ₹{payment.amount:,.0f} for {loan.purpose} loan was successful.",
+                "payment", f"/loan/{loan.id}")
+            # Notify all analysts about the EMI received
+            notify_all_analysts(
+                session,
+                "💰 EMI Payment Received",
+                f"{user.name} paid ₹{payment.amount:,.0f} for their {loan.purpose} loan",
+                "payment",
+                "/dashboard"
+            )
+        session.close()
+        return {"success": True, "message": "Payment verified successfully", "carryover_note": carryover_msg}
     except razorpay.errors.SignatureVerificationError:
         session.close()
         return {"error": "Invalid signature — payment verification failed"}
@@ -801,7 +1312,6 @@ def verify_payment(data: dict, current_user: dict = Depends(get_current_user)):
 
 @app.get("/payment-history/{loan_id}")
 def get_payment_history(loan_id: int, current_user: dict = Depends(get_current_user)):
-    """Get all payments for a loan"""
     session = Session()
     payments = session.query(Payment).filter(
         Payment.loan_id == loan_id,
@@ -821,11 +1331,12 @@ def get_payment_history(loan_id: int, current_user: dict = Depends(get_current_u
     ]
     session.close()
     return result
+
+
 # ============== DEFERRAL ENDPOINTS ==============
 
 @app.post("/request-deferral/{loan_id}")
 def request_deferral(loan_id: int, data: dict, current_user: dict = Depends(get_current_user)):
-    """Borrower requests EMI deferral"""
     session = Session()
     try:
         loan = session.query(Loan).filter(
@@ -840,7 +1351,6 @@ def request_deferral(loan_id: int, data: dict, current_user: dict = Depends(get_
             session.close()
             return {"error": "Can only defer active loans"}
 
-        # Check if there's already a pending request
         existing = session.query(DeferralRequest).filter(
             DeferralRequest.loan_id == loan_id,
             DeferralRequest.status == "pending"
@@ -870,6 +1380,16 @@ def request_deferral(loan_id: int, data: dict, current_user: dict = Depends(get_
         session.commit()
         session.refresh(deferral)
         deferral_id = deferral.id
+        # Notify all analysts about the deferral request
+        borrower = session.query(User).filter(User.id == current_user["user_id"]).first()
+        borrower_name = borrower.name if borrower else "A borrower"
+        notify_all_analysts(
+            session,
+            "⏸ Deferral Request",
+            f"{borrower_name} requested a {months}-month deferral on their {loan.purpose} loan. Reason: {reason[:60]}{'...' if len(reason) > 60 else ''}",
+            "warning",
+            "/dashboard"
+        )
         session.close()
 
         return {
@@ -884,7 +1404,6 @@ def request_deferral(loan_id: int, data: dict, current_user: dict = Depends(get_
 
 @app.get("/my-deferrals/{loan_id}")
 def get_my_deferrals(loan_id: int, current_user: dict = Depends(get_current_user)):
-    """Get deferral requests for a specific loan"""
     session = Session()
     deferrals = session.query(DeferralRequest).filter(
         DeferralRequest.loan_id == loan_id,
@@ -909,7 +1428,6 @@ def get_my_deferrals(loan_id: int, current_user: dict = Depends(get_current_user
 
 @app.get("/pending-deferrals")
 def get_pending_deferrals(current_user: dict = Depends(get_current_user)):
-    """For analysts — list all pending deferral requests"""
     if current_user.get("role") != "analyst":
         return {"error": "Only analysts can view this"}
 
@@ -940,11 +1458,10 @@ def get_pending_deferrals(current_user: dict = Depends(get_current_user)):
 
 @app.post("/review-deferral/{deferral_id}")
 def review_deferral(deferral_id: int, data: dict, current_user: dict = Depends(get_current_user)):
-    """Analyst approves or rejects a deferral request"""
     if current_user.get("role") != "analyst":
         return {"error": "Only analysts can review deferrals"}
 
-    decision = data.get("decision")  # "approve" or "reject"
+    decision = data.get("decision")
     note = data.get("note", "")
 
     if decision not in ["approve", "reject"]:
@@ -967,9 +1484,1112 @@ def review_deferral(deferral_id: int, data: dict, current_user: dict = Depends(g
         deferral.reviewed_by = current_user["user_id"]
         deferral.reviewed_at = datetime.utcnow()
         session.commit()
+
+        user = session.query(User).filter(User.id == deferral.user_id).first()
+        if user:
+            email = deferral_decision_email(user.name, deferral.status, deferral.requested_months, note)
+            send_email(user.email, email["subject"], email["html"])
+            create_notification(session, deferral.user_id, "Deferral Request Update",
+            f"Your deferral request has been {decision}.",
+            "info", f"/loan/{deferral.loan_id}")
+
+        session.close()
+        return {"success": True, "message": f"Deferral {deferral.status}"}
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+@app.post("/update-profile")
+def update_profile(data: dict, current_user: dict = Depends(get_current_user)):
+    """Update borrower profile — gender, DOB, employment type, PAN"""
+    session = Session()
+    try:
+        user = session.query(User).filter(User.id == current_user["user_id"]).first()
+        if not user:
+            session.close()
+            return {"error": "User not found"}
+
+        if "gender" in data:
+            user.gender = data["gender"]
+        if "date_of_birth" in data:
+            user.date_of_birth = data["date_of_birth"]
+        if "pan_number" in data:
+            user.pan_number = data["pan_number"]
+        if "employment_type" in data:
+            user.employment_type = data["employment_type"]
+
+        session.commit()
+        session.close()
+        return {"success": True, "message": "Profile updated"}
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
+
+@app.get("/my-profile")
+def get_my_profile(current_user: dict = Depends(get_current_user)):
+    session = Session()
+    user = session.query(User).filter(User.id == current_user["user_id"]).first()
+    if not user:
+        session.close()
+        return {"error": "User not found"}
+    result = {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "role": user.role,
+        "gender": user.gender,
+        "date_of_birth": user.date_of_birth,
+        "pan_number": user.pan_number,
+        "employment_type": user.employment_type
+    }
+    session.close()
+    return result
+# ============== SMART EMI / PARTIAL PAYMENT ENDPOINTS ==============
+
+@app.get("/emi-status/{loan_id}")
+def get_emi_status(loan_id: int, current_user: dict = Depends(get_current_user)):
+    """Get current EMI status — what's due, how late, suggestions"""
+    session = Session()
+    loan = session.query(Loan).filter(
+        Loan.id == loan_id,
+        Loan.user_id == current_user["user_id"]
+    ).first()
+    if not loan:
+        session.close()
+        return {"error": "Loan not found"}
+
+    # Count paid EMIs
+    paid_payments = session.query(Payment).filter(
+        Payment.loan_id == loan_id,
+        Payment.status == "paid"
+    ).all()
+    total_paid = sum(p.amount for p in paid_payments)
+    paid_count = len(paid_payments)
+
+    # Calculate next EMI due date (1 month from disbursement, then monthly)
+    if not loan.reviewed_at:
+        next_due = datetime.utcnow()
+    else:
+        # First EMI due 1 month after disbursement; each subsequent EMI 1 month later
+        from datetime import timedelta
+        months_since = paid_count + 1
+        next_due = loan.reviewed_at + timedelta(days=30 * months_since)
+
+    today = datetime.utcnow()
+    days_late = max(0, (today - next_due).days) if next_due < today else 0
+    days_until_due = max(0, (next_due - today).days) if next_due > today else 0
+    # Effective EMI includes any carry-over adjustment from prior partial payments
+    effective_emi = round(loan.installment + (loan.emi_adjustment or 0), 2)
+    # Calculate late fee (₹500 + 2% of EMI per week late, capped at 10% of EMI)
+    late_fee = 0
+    if days_late > 0:
+        weeks_late = (days_late // 7) + 1
+        late_fee = min(500 + (weeks_late * 0.02 * effective_emi), effective_emi * 0.10)
+        late_fee = round(late_fee, 2)
+
+    # Smart suggestion based on situation
+    suggestion = {
+        "primary": "full_payment",
+        "title": "Pay full EMI",
+        "description": f"Pay your monthly EMI of ₹{effective_emi:,.0f} to stay on track.",
+        "options": []
+    }
+
+    if days_late > 30:
+        suggestion = {
+            "primary": "urgent",
+            "title": "⚠ Payment overdue",
+            "description": f"You're {days_late} days late. A penalty of ₹{late_fee:,.0f} applies. Pay now to avoid CIBIL impact.",
+            "options": ["pay_full_with_penalty", "request_deferral"]
+        }
+    elif days_late > 7:
+        suggestion = {
+            "primary": "late",
+            "title": "Payment is late",
+            "description": f"You're {days_late} days late. A penalty of ₹{late_fee:,.0f} applies.",
+            "options": ["pay_full_with_penalty", "pay_partial", "request_deferral"]
+        }
+    elif days_until_due > 0 and days_until_due <= 5:
+        suggestion = {
+            "primary": "due_soon",
+            "title": f"EMI due in {days_until_due} days",
+            "description": f"₹{effective_emi:,.0f} is due on {next_due.strftime('%d %b %Y')}",
+            "options": ["pay_full"]
+        }
+
+    remaining_principal = loan.loan_amnt - total_paid
+    progress_pct = (total_paid / loan.loan_amnt * 100) if loan.loan_amnt > 0 else 0
+
+    session.close()
+    return {
+        "loan_id": loan_id,
+        "purpose": loan.purpose,
+        "loan_amnt": loan.loan_amnt,
+        "expected_emi": effective_emi,
+        "base_emi": round(loan.installment, 2),
+        "emi_adjustment": round(loan.emi_adjustment or 0, 2),
+        "carryover_balance": round(loan.carryover_balance or 0, 2),
+        "paid_count": paid_count,
+        "total_term": loan.term,
+        "total_paid": round(total_paid, 2),
+        "remaining_principal": round(remaining_principal, 2),
+        "progress_pct": round(progress_pct, 1),
+        "next_due_date": next_due.strftime("%Y-%m-%d"),
+        "days_late": days_late,
+        "days_until_due": days_until_due,
+        "late_fee": late_fee,
+        "total_due_today": round(effective_emi + late_fee, 2),
+        "suggestion": suggestion,
+        "min_partial_amount": round(effective_emi * 0.30, 2)  # minimum 30% of EMI for partial
+    }
+
+
+@app.post("/create-payment-order/{loan_id}")
+def create_payment_order_v2(loan_id: int, data: dict = None, current_user: dict = Depends(get_current_user)):
+    """Create Razorpay order — supports full, partial, or with-penalty payments"""
+    if not razorpay_client:
+        return {"error": "Razorpay not configured"}
+
+    if data is None:
+        data = {}
+    payment_type = data.get("payment_type", "full")  # full, partial
+    custom_amount = data.get("amount", None)  # for partial payments
+
+    session = Session()
+    try:
+        loan = session.query(Loan).filter(
+            Loan.id == loan_id,
+            Loan.user_id == current_user["user_id"]
+        ).first()
+
+        if not loan:
+            session.close()
+            return {"error": "Loan not found"}
+        if loan.status != "active":
+            session.close()
+            return {"error": "Loan is not active"}
+
+        installment = float(loan.installment) + float(loan.emi_adjustment or 0)
+        purpose = loan.purpose
+
+        # Calculate days late + penalty
+        from datetime import timedelta
+        paid_count = session.query(Payment).filter(
+            Payment.loan_id == loan_id,
+            Payment.status == "paid"
+        ).count()
+
+        late_fee = 0
+        days_late = 0
+        if loan.reviewed_at:
+            next_due = loan.reviewed_at + timedelta(days=30 * (paid_count + 1))
+            days_late = max(0, (datetime.utcnow() - next_due).days)
+            if days_late > 0:
+                weeks_late = (days_late // 7) + 1
+                late_fee = min(500 + (weeks_late * 0.02 * installment), installment * 0.10)
+                late_fee = round(late_fee, 2)
+
+        # Determine final amount
+        if payment_type == "partial":
+            payment_amount = float(custom_amount or 0)
+            if payment_amount < installment * 0.30:
+                session.close()
+                return {"error": f"Minimum partial payment is ₹{installment * 0.30:,.0f} (30% of EMI)"}
+            if payment_amount > installment:
+                session.close()
+                return {"error": "Partial payment cannot exceed full EMI. Use 'full' payment type instead."}
+        else:
+            payment_amount = installment + late_fee
+
+        amount_paise = int(payment_amount * 100)
+
+        order_data = {
+            "amount": amount_paise,
+            "currency": "INR",
+            "receipt": f"loan_{loan_id}_{payment_type}_{int(datetime.utcnow().timestamp())}",
+            "notes": {
+                "loan_id": str(loan_id),
+                "user_id": str(current_user["user_id"]),
+                "purpose": purpose,
+                "payment_type": payment_type,
+                "late_fee": str(late_fee)
+            }
+        }
+        order = razorpay_client.order.create(data=order_data)
+
+        payment = Payment(
+            loan_id=loan_id,
+            user_id=current_user["user_id"],
+            amount=payment_amount,
+            payment_type=payment_type,
+            expected_emi=installment,
+            late_fee=late_fee,
+            days_late=days_late,
+            razorpay_order_id=order["id"],
+            status="created"
+        )
+        session.add(payment)
+        session.commit()
+        payment_id = payment.id
         session.close()
 
-        return {"success": True, "message": f"Deferral {deferral.status}"}
+        return {
+            "success": True,
+            "order_id": order["id"],
+            "amount": amount_paise,
+            "currency": "INR",
+            "key_id": RAZORPAY_KEY_ID,
+            "payment_id": payment_id,
+            "loan_purpose": purpose,
+            "emi_amount": payment_amount,
+            "payment_type": payment_type,
+            "late_fee": late_fee,
+            "days_late": days_late
+        }
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
+def create_notification(session, user_id, title, message, ntype="info", link=None):
+    """Helper to create a notification"""
+    try:
+        notif = Notification(
+            user_id=user_id,
+            title=title,
+            message=message,
+            type=ntype,
+            link=link
+        )
+        session.add(notif)
+        session.commit()
+    except Exception as e:
+        print(f"Notification failed: {e}")
+
+def notify_all_analysts(session, title, message, ntype="info", link=None):
+    """Send a notification to every analyst user."""
+    try:
+        analysts = session.query(User).filter(User.role == "analyst").all()
+        for a in analysts:
+            notif = Notification(
+                user_id=a.id,
+                title=title,
+                message=message,
+                type=ntype,
+                link=link
+            )
+            session.add(notif)
+        session.commit()
+    except Exception as e:
+        print(f"Analyst notif failed: {e}")   
+    # ============== NOTIFICATIONS ==============
+
+@app.get("/notifications")
+def get_notifications(current_user: dict = Depends(get_current_user)):
+    """Get all notifications for the current user, newest first"""
+    session = Session()
+    notifs = session.query(Notification).filter(
+        Notification.user_id == current_user["user_id"]
+    ).order_by(Notification.created_at.desc()).limit(30).all()
+
+    result = [{
+        "id": n.id,
+        "title": n.title,
+        "message": n.message,
+        "type": n.type,
+        "is_read": n.is_read,
+        "link": n.link,
+        "created_at": n.created_at.isoformat() if n.created_at else None
+    } for n in notifs]
+
+    unread_count = session.query(Notification).filter(
+        Notification.user_id == current_user["user_id"],
+        Notification.is_read == False
+    ).count()
+
+    session.close()
+    return {"notifications": result, "unread_count": unread_count}
+
+
+@app.post("/notifications/mark-read")
+def mark_notifications_read(current_user: dict = Depends(get_current_user)):
+    """Mark all notifications as read"""
+    session = Session()
+    session.query(Notification).filter(
+        Notification.user_id == current_user["user_id"],
+        Notification.is_read == False
+    ).update({"is_read": True})
+    session.commit()
+    session.close()
+    return {"success": True}
+# ============== AMORTIZATION PDF ==============
+
+@app.get("/loan/{loan_id}/amortization-pdf")
+def amortization_pdf(loan_id: int, current_user: dict = Depends(get_current_user)):
+    """Generate a downloadable amortization schedule PDF"""
+    session = Session()
+    loan = session.query(Loan).filter(
+        Loan.id == loan_id,
+        Loan.user_id == current_user["user_id"]
+    ).first()
+    if not loan:
+        session.close()
+        return {"error": "Loan not found"}
+
+    user = session.query(User).filter(User.id == loan.user_id).first()
+    payments = session.query(Payment).filter(
+        Payment.loan_id == loan_id,
+        Payment.status == "paid"
+    ).order_by(Payment.paid_at).all()
+
+    # Capture before session.close()
+    loan_data = {
+        "id": loan.id,
+        "purpose": loan.purpose,
+        "loan_amnt": loan.loan_amnt,
+        "term": loan.term,
+        "int_rate": loan.int_rate,
+        "installment": loan.installment,
+        "cibil_score": loan.cibil_score or 0,
+        "created_at": loan.created_at.strftime("%d %b %Y") if loan.created_at else "",
+        "reviewed_at": loan.reviewed_at.strftime("%d %b %Y") if loan.reviewed_at else "Pending",
+        "status": loan.status,
+    }
+    user_data = {"name": user.name, "email": user.email}
+    paid_emi_numbers = set()
+    for i, _ in enumerate(payments, start=1):
+        paid_emi_numbers.add(i)
+    session.close()
+
+    # Build amortization schedule
+    P = loan_data["loan_amnt"]
+    r = loan_data["int_rate"] / 100 / 12
+    n = loan_data["term"]
+    emi = loan_data["installment"]
+    start_date = datetime.strptime(loan_data["reviewed_at"], "%d %b %Y") if loan_data["status"] == "active" else datetime.utcnow()
+
+    schedule = []
+    balance = P
+    total_interest = 0
+    total_principal = 0
+    from datetime import timedelta
+    for i in range(1, n + 1):
+        interest = balance * r
+        principal = emi - interest
+        balance = max(0, balance - principal)
+        total_interest += interest
+        total_principal += principal
+        due_date = start_date + timedelta(days=30 * i)
+        status = "✓ Paid" if i in paid_emi_numbers else ("Overdue" if due_date < datetime.utcnow() else "Pending")
+        schedule.append({
+            "no": i,
+            "date": due_date.strftime("%d %b %Y"),
+            "emi": emi,
+            "principal": principal,
+            "interest": interest,
+            "balance": balance,
+            "status": status,
+        })
+
+    # Build PDF
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+                            leftMargin=18*mm, rightMargin=18*mm,
+                            topMargin=18*mm, bottomMargin=18*mm)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("Title", parent=styles["Title"],
+                                  fontSize=22, textColor=colors.HexColor("#1a1a2e"),
+                                  spaceAfter=4)
+    subtitle_style = ParagraphStyle("Subtitle", parent=styles["Normal"],
+                                     fontSize=10, textColor=colors.HexColor("#8892a4"),
+                                     spaceAfter=18)
+    h2_style = ParagraphStyle("H2", parent=styles["Heading2"],
+                               fontSize=13, textColor=colors.HexColor("#1a1a2e"),
+                               spaceAfter=10, spaceBefore=14)
+    normal = ParagraphStyle("Body", parent=styles["Normal"], fontSize=10, leading=14)
+
+    elements = []
+    elements.append(Paragraph("LoanSense", title_style))
+    elements.append(Paragraph(f"Amortization Schedule · Generated on {datetime.utcnow().strftime('%d %b %Y')}", subtitle_style))
+
+    # Borrower & loan summary
+    elements.append(Paragraph("Loan Summary", h2_style))
+    summary_data = [
+        ["Borrower", user_data["name"], "Loan ID", f"#{loan_data['id']}"],
+        ["Email", user_data["email"], "Status", loan_data["status"].title()],
+        ["Loan Type", loan_data["purpose"].title(), "CIBIL Score", str(loan_data["cibil_score"])],
+        ["Principal", f"INR {loan_data['loan_amnt']:,.0f}", "Interest Rate", f"{loan_data['int_rate']}% p.a."],
+        ["Tenure", f"{loan_data['term']} months", "Monthly EMI", f"INR {loan_data['installment']:,.0f}"],
+        ["Applied On", loan_data["created_at"], "Disbursed On", loan_data["reviewed_at"]],
+    ]
+    summary_table = Table(summary_data, colWidths=[28*mm, 55*mm, 28*mm, 55*mm])
+    summary_table.setStyle(TableStyle([
+        ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
+        ("FONTSIZE", (0,0), (-1,-1), 9),
+        ("TEXTCOLOR", (0,0), (0,-1), colors.HexColor("#8892a4")),
+        ("TEXTCOLOR", (2,0), (2,-1), colors.HexColor("#8892a4")),
+        ("TEXTCOLOR", (1,0), (1,-1), colors.HexColor("#1a1a2e")),
+        ("TEXTCOLOR", (3,0), (3,-1), colors.HexColor("#1a1a2e")),
+        ("FONTNAME", (1,0), (1,-1), "Helvetica-Bold"),
+        ("FONTNAME", (3,0), (3,-1), "Helvetica-Bold"),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 7),
+        ("TOPPADDING", (0,0), (-1,-1), 7),
+        ("LINEBELOW", (0,0), (-1,-2), 0.3, colors.HexColor("#f0f2f7")),
+    ]))
+    elements.append(summary_table)
+
+    # Totals
+    elements.append(Paragraph("Total Repayment Breakdown", h2_style))
+    total_payable = total_principal + total_interest
+    totals_data = [
+        ["Total Principal", f"INR {total_principal:,.2f}"],
+        ["Total Interest", f"INR {total_interest:,.2f}"],
+        ["Total Amount Payable", f"INR {total_payable:,.2f}"],
+    ]
+    totals_table = Table(totals_data, colWidths=[80*mm, 86*mm])
+    totals_table.setStyle(TableStyle([
+        ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
+        ("FONTSIZE", (0,0), (-1,-1), 10),
+        ("BACKGROUND", (0,2), (-1,2), colors.HexColor("#1a1a2e")),
+        ("TEXTCOLOR", (0,2), (-1,2), colors.white),
+        ("FONTNAME", (0,2), (-1,2), "Helvetica-Bold"),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 8),
+        ("TOPPADDING", (0,0), (-1,-1), 8),
+        ("LINEBELOW", (0,0), (-1,1), 0.3, colors.HexColor("#f0f2f7")),
+    ]))
+    elements.append(totals_table)
+
+    # Amortization schedule table
+    elements.append(Paragraph("Monthly Payment Schedule", h2_style))
+    sched_header = ["#", "Due Date", "EMI", "Principal", "Interest", "Balance", "Status"]
+    sched_rows = [sched_header]
+    for row in schedule:
+        sched_rows.append([
+            str(row["no"]),
+            row["date"],
+            f"{row['emi']:,.0f}",
+            f"{row['principal']:,.0f}",
+            f"{row['interest']:,.0f}",
+            f"{row['balance']:,.0f}",
+            row["status"],
+        ])
+    sched_table = Table(sched_rows,
+                        colWidths=[10*mm, 25*mm, 25*mm, 28*mm, 25*mm, 30*mm, 23*mm],
+                        repeatRows=1)
+    sched_style = TableStyle([
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#1a1a2e")),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+        ("FONTSIZE", (0,0), (-1,-1), 8),
+        ("ALIGN", (0,0), (-1,-1), "RIGHT"),
+        ("ALIGN", (0,0), (1,-1), "LEFT"),
+        ("ALIGN", (6,1), (6,-1), "CENTER"),
+        ("ALIGN", (0,0), (-1,0), "CENTER"),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+        ("TOPPADDING", (0,0), (-1,-1), 5),
+        ("GRID", (0,0), (-1,-1), 0.3, colors.HexColor("#eaedf3")),
+    ])
+    # Alternate row coloring + status coloring
+    for i, row in enumerate(schedule, start=1):
+        if i % 2 == 0:
+            sched_style.add("BACKGROUND", (0,i), (-1,i), colors.HexColor("#fafbfc"))
+        if "Paid" in row["status"]:
+            sched_style.add("TEXTCOLOR", (6,i), (6,i), colors.HexColor("#1a7a3c"))
+            sched_style.add("FONTNAME", (6,i), (6,i), "Helvetica-Bold")
+        elif row["status"] == "Overdue":
+            sched_style.add("TEXTCOLOR", (6,i), (6,i), colors.HexColor("#c0392b"))
+            sched_style.add("FONTNAME", (6,i), (6,i), "Helvetica-Bold")
+        else:
+            sched_style.add("TEXTCOLOR", (6,i), (6,i), colors.HexColor("#8892a4"))
+    sched_table.setStyle(sched_style)
+    elements.append(sched_table)
+
+    # Footer
+    footer_style = ParagraphStyle("Footer", parent=normal, fontSize=8,
+                                   textColor=colors.HexColor("#8892a4"), spaceBefore=18)
+    elements.append(Spacer(1, 12))
+    elements.append(Paragraph(
+        "This is a system-generated amortization schedule. All amounts are in Indian Rupees (INR). "
+        "Actual EMI may vary slightly due to rounding, late fees, or partial payments. "
+        "For queries, contact LoanSense support.", footer_style))
+
+    doc.build(elements)
+    buf.seek(0)
+    filename = f"loansense_loan_{loan_id}_schedule.pdf"
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+# ============== SUPPORT TICKETS ==============
+
+@app.post("/support/create-ticket")
+def create_ticket(data: dict, current_user: dict = Depends(get_current_user)):
+    """Borrower raises a new support ticket"""
+    subject = (data.get("subject") or "").strip()
+    message = (data.get("message") or "").strip()
+    category = data.get("category", "general")
+    priority = data.get("priority", "normal")
+
+    if not subject or len(subject) < 5:
+        return {"error": "Subject must be at least 5 characters"}
+    if not message or len(message) < 20:
+        return {"error": "Please describe your issue (at least 20 characters)"}
+    if category not in ["general", "payment", "technical", "account", "complaint"]:
+        category = "general"
+    if priority not in ["low", "normal", "high", "urgent"]:
+        priority = "normal"
+
+    session = Session()
+    try:
+        user = session.query(User).filter(User.id == current_user["user_id"]).first()
+        ticket = SupportTicket(
+            user_id=current_user["user_id"],
+            subject=subject,
+            message=message,
+            category=category,
+            priority=priority,
+            status="open"
+        )
+        session.add(ticket)
+        session.commit()
+        session.refresh(ticket)
+        ticket_id = ticket.id
+
+        # Add the initial message to the thread
+        first_msg = TicketMessage(
+            ticket_id=ticket_id,
+            sender_id=current_user["user_id"],
+            sender_role="borrower",
+            message=message
+        )
+        session.add(first_msg)
+        session.commit()
+
+        # Notify analysts about the new ticket
+        notify_all_analysts(
+            session,
+            "🎫 New support ticket",
+            f"{user.name if user else 'A borrower'} raised a {priority} priority ticket: {subject[:60]}",
+            "warning" if priority in ["high", "urgent"] else "info",
+            "/dashboard"
+        )
+
+        # Notify borrower their ticket is created
+        create_notification(
+            session, current_user["user_id"],
+            "🎫 Support ticket created",
+            f"Your ticket '{subject[:50]}' has been received. We'll respond within 24 hours.",
+            "info",
+            "/support"
+        )
+
+        session.close()
+        return {"success": True, "ticket_id": ticket_id,
+                "message": "Ticket created. We'll respond within 24 hours."}
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
+
+@app.get("/support/my-tickets")
+def my_tickets(current_user: dict = Depends(get_current_user)):
+    """Borrower fetches their own tickets — with full message threads"""
+    session = Session()
+    tickets = session.query(SupportTicket).filter(
+        SupportTicket.user_id == current_user["user_id"]
+    ).order_by(SupportTicket.created_at.desc()).all()
+
+    result = []
+    for t in tickets:
+        msgs = session.query(TicketMessage).filter(
+            TicketMessage.ticket_id == t.id
+        ).order_by(TicketMessage.created_at.asc()).all()
+        thread = [{
+            "id": m.id,
+            "sender_role": m.sender_role,
+            "message": m.message,
+            "created_at": m.created_at.isoformat() if m.created_at else None
+        } for m in msgs]
+
+        result.append({
+            "id": t.id,
+            "subject": t.subject,
+            "category": t.category,
+            "priority": t.priority,
+            "status": t.status,
+            "thread": thread,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+        })
+    session.close()
+    return result
+
+
+@app.get("/support/all-tickets")
+def all_tickets(current_user: dict = Depends(get_current_user)):
+    """Analyst view: all tickets across all borrowers, with threads"""
+    if current_user.get("role") != "analyst":
+        return {"error": "Not authorized"}
+
+    session = Session()
+    tickets = session.query(SupportTicket).order_by(
+        SupportTicket.status.asc(),
+        SupportTicket.priority.desc(),
+        SupportTicket.created_at.desc()
+    ).all()
+
+    result = []
+    for t in tickets:
+        u = session.query(User).filter(User.id == t.user_id).first()
+        msgs = session.query(TicketMessage).filter(
+            TicketMessage.ticket_id == t.id
+        ).order_by(TicketMessage.created_at.asc()).all()
+        thread = [{
+            "id": m.id,
+            "sender_role": m.sender_role,
+            "message": m.message,
+            "created_at": m.created_at.isoformat() if m.created_at else None
+        } for m in msgs]
+
+        result.append({
+            "id": t.id,
+            "subject": t.subject,
+            "category": t.category,
+            "priority": t.priority,
+            "status": t.status,
+            "thread": thread,
+            "borrower_name": u.name if u else "Unknown",
+            "borrower_email": u.email if u else "",
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+        })
+    session.close()
+    return result
+
+
+@app.post("/support/respond/{ticket_id}")
+def respond_ticket(ticket_id: int, data: dict, current_user: dict = Depends(get_current_user)):
+    """Analyst responds to / resolves a ticket"""
+    if current_user.get("role") != "analyst":
+        return {"error": "Not authorized"}
+
+    response_text = (data.get("response") or "").strip()
+    new_status = data.get("status", "resolved")
+
+    if not response_text or len(response_text) < 10:
+        return {"error": "Response must be at least 10 characters"}
+    if new_status not in ["in_progress", "resolved", "closed"]:
+        new_status = "resolved"
+
+    session = Session()
+    try:
+        ticket = session.query(SupportTicket).filter(SupportTicket.id == ticket_id).first()
+        if not ticket:
+            session.close()
+            return {"error": "Ticket not found"}
+
+        ticket.response = response_text  # keep for backward compat
+        ticket.status = new_status
+        ticket.responded_by = current_user["user_id"]
+        ticket.responded_at = datetime.utcnow()
+
+        # Add this response as a thread message
+        msg = TicketMessage(
+            ticket_id=ticket.id,
+            sender_id=current_user["user_id"],
+            sender_role="analyst",
+            message=response_text
+        )
+        session.add(msg)
+        session.commit()
+
+        # Notify the borrower
+        create_notification(
+            session, ticket.user_id,
+            f"✓ Support ticket {new_status}",
+            f"Your ticket '{ticket.subject[:50]}' has been {new_status}. View response in /support",
+            "success" if new_status == "resolved" else "info",
+            "/support"
+        )
+
+        session.close()
+        return {"success": True, "message": f"Ticket {new_status}"}
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+@app.post("/support/reply/{ticket_id}")
+def reply_to_ticket(ticket_id: int, data: dict, current_user: dict = Depends(get_current_user)):
+    """Borrower follows up on an existing ticket — reopens it"""
+    message_text = (data.get("message") or "").strip()
+    if not message_text or len(message_text) < 10:
+        return {"error": "Reply must be at least 10 characters"}
+
+    session = Session()
+    try:
+        ticket = session.query(SupportTicket).filter(
+            SupportTicket.id == ticket_id,
+            SupportTicket.user_id == current_user["user_id"]  # only own tickets
+        ).first()
+        if not ticket:
+            session.close()
+            return {"error": "Ticket not found"}
+        if ticket.status == "closed":
+            session.close()
+            return {"error": "This ticket is closed. Please raise a new one."}
+
+        # Add the borrower's reply
+        msg = TicketMessage(
+            ticket_id=ticket_id,
+            sender_id=current_user["user_id"],
+            sender_role="borrower",
+            message=message_text
+        )
+        session.add(msg)
+
+        # Reopen the ticket if it was resolved
+        if ticket.status in ["resolved", "in_progress"]:
+            ticket.status = "reopened"
+        session.commit()
+
+        # Notify analysts
+        user = session.query(User).filter(User.id == current_user["user_id"]).first()
+        notify_all_analysts(
+            session,
+            "🔄 Ticket reopened",
+            f"{user.name if user else 'A borrower'} replied on ticket: {ticket.subject[:50]}",
+            "warning",
+            "/dashboard"
+        )
+
+        session.close()
+        return {"success": True, "message": "Reply sent. Bank will respond shortly."}
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
+
+# ============== DEFAULT RADAR ==============
+
+@app.get("/analyst/default-radar")
+def default_radar(current_user: dict = Depends(get_current_user)):
+    """
+    Dynamic risk scoring based on payment behavior.
+    Returns active loans sorted by current risk, highlighting those whose risk has risen.
+    """
+    if current_user.get("role") != "analyst":
+        return {"error": "Not authorized"}
+
+    session = Session()
+    try:
+        from datetime import timedelta
+        active = session.query(Loan).filter(Loan.status == "active").all()
+        radar = []
+
+        for loan in active:
+            user = session.query(User).filter(User.id == loan.user_id).first()
+
+            # Original ML risk
+            original_risk = loan.risk_score or 0.5
+
+            # Payment behavior signals
+            payments = session.query(Payment).filter(
+                Payment.loan_id == loan.id,
+                Payment.status == "paid"
+            ).all()
+            total_payments = len(payments)
+            late_payments = sum(1 for p in payments if (p.days_late or 0) > 0)
+            partial_payments = sum(1 for p in payments if p.payment_type == "partial")
+
+            # Days since last payment
+            last_payment = session.query(Payment).filter(
+                Payment.loan_id == loan.id,
+                Payment.status == "paid"
+            ).order_by(Payment.paid_at.desc()).first()
+            days_since_last = None
+            if last_payment and last_payment.paid_at:
+                days_since_last = (datetime.utcnow() - last_payment.paid_at).days
+
+            # Pending deferrals
+            pending_deferrals = session.query(DeferralRequest).filter(
+                DeferralRequest.loan_id == loan.id,
+                DeferralRequest.status == "pending"
+            ).count()
+
+            # Approved deferrals (history)
+            approved_deferrals = session.query(DeferralRequest).filter(
+                DeferralRequest.loan_id == loan.id,
+                DeferralRequest.status == "approved"
+            ).count()
+
+            # Carry-over balance (re-amortization signal)
+            carryover = loan.carryover_balance or 0
+
+            # Dynamic risk score = original + behavior modifiers
+            current_risk = original_risk
+            warnings = []
+
+            if total_payments > 0:
+                late_ratio = late_payments / total_payments
+                if late_ratio >= 0.5:
+                    current_risk += 0.20
+                    warnings.append(f"{late_payments}/{total_payments} payments were late")
+                elif late_ratio >= 0.25:
+                    current_risk += 0.10
+                    warnings.append(f"{late_payments}/{total_payments} late payments")
+
+                partial_ratio = partial_payments / total_payments
+                if partial_ratio >= 0.5:
+                    current_risk += 0.15
+                    warnings.append(f"{partial_payments} partial payments (cash flow stress)")
+                elif partial_ratio > 0:
+                    current_risk += 0.05
+
+            if days_since_last is not None and days_since_last > 45:
+                current_risk += 0.15
+                warnings.append(f"No payment for {days_since_last} days")
+            elif days_since_last is not None and days_since_last > 35:
+                current_risk += 0.07
+                warnings.append(f"Last payment {days_since_last} days ago")
+
+            if approved_deferrals > 0:
+                current_risk += 0.05 * approved_deferrals
+                warnings.append(f"{approved_deferrals} deferral(s) already used")
+
+            if pending_deferrals > 0:
+                current_risk += 0.10
+                warnings.append("Pending deferral request — actively struggling")
+
+            if carryover > 0:
+                # Carry-over ratio vs original EMI
+                ratio = carryover / (loan.installment or 1)
+                if ratio > 1.5:
+                    current_risk += 0.10
+                    warnings.append(f"Carry-over of ₹{carryover:,.0f} (over 1.5× EMI)")
+                elif ratio > 0:
+                    current_risk += 0.05
+
+            current_risk = min(1.0, current_risk)
+            risk_delta = current_risk - original_risk
+
+            # Determine new risk band
+            if current_risk >= 0.65:
+                new_band = "HIGH"
+            elif current_risk >= 0.35:
+                new_band = "MEDIUM"
+            else:
+                new_band = "LOW"
+
+            # Did risk get worse?
+            original_band = loan.risk_level or "MEDIUM"
+            band_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+            band_moved = band_order.get(new_band, 1) - band_order.get(original_band, 1)
+
+            radar.append({
+                "loan_id": loan.id,
+                "borrower_name": user.name if user else "Unknown",
+                "borrower_email": user.email if user else "",
+                "purpose": loan.purpose,
+                "loan_amnt": loan.loan_amnt,
+                "installment": loan.installment,
+                "term": loan.term,
+                "int_rate": loan.int_rate,
+                "original_risk": round(original_risk, 3),
+                "current_risk": round(current_risk, 3),
+                "risk_delta": round(risk_delta, 3),
+                "original_band": original_band,
+                "current_band": new_band,
+                "band_moved": band_moved,  # +1 = risk band went up (worse)
+                "warnings": warnings,
+                "total_payments": total_payments,
+                "late_payments": late_payments,
+                "partial_payments": partial_payments,
+                "days_since_last_payment": days_since_last,
+                "pending_deferrals": pending_deferrals,
+                "carryover_balance": round(carryover, 2)
+            })
+
+        # Sort: bands moved up first, then by current risk descending
+        radar.sort(key=lambda x: (-x["band_moved"], -x["current_risk"]))
+        session.close()
+        return {"loans": radar}
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
+
+# ============== RESTRUCTURING SIMULATOR ==============
+
+@app.post("/analyst/simulate-restructure")
+def simulate_restructure(data: dict, current_user: dict = Depends(get_current_user)):
+    """Preview what a restructured loan would look like — no DB changes"""
+    if current_user.get("role") != "analyst":
+        return {"error": "Not authorized"}
+
+    loan_id = int(data.get("loan_id", 0))
+    extend_months = int(data.get("extend_months", 0))
+    rate_reduction = float(data.get("rate_reduction", 0))  # in percentage points
+
+    session = Session()
+    loan = session.query(Loan).filter(Loan.id == loan_id).first()
+    if not loan:
+        session.close()
+        return {"error": "Loan not found"}
+
+    # Count paid EMIs
+    paid_count = session.query(Payment).filter(
+        Payment.loan_id == loan_id,
+        Payment.status == "paid"
+    ).count()
+    total_paid = session.query(func.sum(Payment.amount)).filter(
+        Payment.loan_id == loan_id,
+        Payment.status == "paid"
+    ).scalar() or 0
+    session.close()
+
+    # Remaining principal (rough estimate — original principal minus paid amount)
+    # In real banking we'd use amortization to compute true remaining principal
+    # For now, simplified: remaining = loan_amnt - (total_paid - interest_paid_so_far)
+    # Even simpler heuristic: estimate from EMI count
+    remaining_principal = loan.loan_amnt - total_paid
+    if remaining_principal < 0:
+        remaining_principal = loan.loan_amnt * 0.5
+
+    remaining_months_current = max(loan.term - paid_count, 1)
+    new_tenure = remaining_months_current + extend_months
+    new_rate = max(loan.int_rate - rate_reduction, 5.0)  # floor at 5%
+
+    # Calculate new EMI
+    r = new_rate / 100 / 12
+    n = new_tenure
+    if r > 0:
+        new_emi = (remaining_principal * r * (1 + r) ** n) / ((1 + r) ** n - 1)
+    else:
+        new_emi = remaining_principal / n
+
+    current_emi = loan.installment + (loan.emi_adjustment or 0)
+    emi_drop = current_emi - new_emi
+    emi_drop_pct = (emi_drop / current_emi * 100) if current_emi > 0 else 0
+
+    # Total interest cost comparison
+    current_total = current_emi * remaining_months_current
+    new_total = new_emi * new_tenure
+
+    return {
+        "current_emi": round(current_emi, 2),
+        "current_remaining_months": remaining_months_current,
+        "current_rate": round(loan.int_rate, 2),
+        "remaining_principal": round(remaining_principal, 2),
+        "new_emi": round(new_emi, 2),
+        "new_tenure": new_tenure,
+        "new_rate": round(new_rate, 2),
+        "emi_drop": round(emi_drop, 2),
+        "emi_drop_pct": round(emi_drop_pct, 1),
+        "extra_months": extend_months,
+        "rate_reduction": rate_reduction,
+        "current_total_payable": round(current_total, 2),
+        "new_total_payable": round(new_total, 2),
+        "extra_interest_cost": round(new_total - current_total, 2)  # if positive, borrower pays more total but smaller EMI
+    }
+
+
+@app.post("/analyst/apply-restructure/{loan_id}")
+def apply_restructure(loan_id: int, data: dict, current_user: dict = Depends(get_current_user)):
+    """Actually apply the restructuring to a loan"""
+    if current_user.get("role") != "analyst":
+        return {"error": "Not authorized"}
+
+    extend_months = int(data.get("extend_months", 0))
+    rate_reduction = float(data.get("rate_reduction", 0))
+    reason = (data.get("reason") or "").strip()
+
+    if extend_months < 0 or extend_months > 60:
+        return {"error": "Tenure extension must be 0-60 months"}
+    if rate_reduction < 0 or rate_reduction > 5:
+        return {"error": "Rate reduction must be 0-5%"}
+    if not reason or len(reason) < 10:
+        return {"error": "Please provide a reason (at least 10 characters)"}
+
+    session = Session()
+    try:
+        loan = session.query(Loan).filter(Loan.id == loan_id).first()
+        if not loan:
+            session.close()
+            return {"error": "Loan not found"}
+        if loan.status != "active":
+            session.close()
+            return {"error": "Can only restructure active loans"}
+
+        paid_count = session.query(Payment).filter(
+            Payment.loan_id == loan_id,
+            Payment.status == "paid"
+        ).count()
+        total_paid = session.query(func.sum(Payment.amount)).filter(
+            Payment.loan_id == loan_id,
+            Payment.status == "paid"
+        ).scalar() or 0
+
+        remaining_principal = max(loan.loan_amnt - total_paid, loan.loan_amnt * 0.5)
+        new_tenure_total = loan.term + extend_months
+        new_rate = max(loan.int_rate - rate_reduction, 5.0)
+
+        # Recalculate EMI for remaining
+        remaining_months = max(loan.term - paid_count, 1) + extend_months
+        r = new_rate / 100 / 12
+        n = remaining_months
+        if r > 0:
+            new_emi = (remaining_principal * r * (1 + r) ** n) / ((1 + r) ** n - 1)
+        else:
+            new_emi = remaining_principal / n
+        new_emi = round(new_emi, 2)
+
+        # Apply changes
+        loan.term = new_tenure_total
+        loan.int_rate = new_rate
+        loan.installment = new_emi
+        # Reset carry-over since EMI is recalculated
+        loan.emi_adjustment = 0
+        loan.carryover_balance = 0
+        session.commit()
+
+        # Notify borrower
+        user = session.query(User).filter(User.id == loan.user_id).first()
+        create_notification(
+            session, loan.user_id,
+            "🔄 Your loan has been restructured",
+            f"Good news — your {loan.purpose} loan has been restructured. New EMI: ₹{new_emi:,.0f}, tenure: {new_tenure_total} months. Reason: {reason[:60]}",
+            "success",
+            f"/loan/{loan.id}"
+        )
+
+        # Email the borrower
+        if user:
+            try:
+                email_html = f"""
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                    <div style="background: #1a7a3c; color: white; padding: 24px;">
+                        <h1 style="margin: 0;">🔄 Loan Restructured</h1>
+                    </div>
+                    <div style="padding: 24px; background: #f7f8fc;">
+                        <p>Hi {user.name},</p>
+                        <p>Good news — your {loan.purpose} loan has been restructured to give you more breathing room:</p>
+                        <table style="width: 100%; background: white; border-radius: 8px; padding: 16px; margin: 16px 0;">
+                            <tr><td style="padding: 8px; color: #8892a4;">New EMI</td><td style="padding: 8px; font-weight: 600;">₹{new_emi:,.0f}</td></tr>
+                            <tr><td style="padding: 8px; color: #8892a4;">New Tenure</td><td style="padding: 8px; font-weight: 600;">{new_tenure_total} months</td></tr>
+                            <tr><td style="padding: 8px; color: #8892a4;">New Interest Rate</td><td style="padding: 8px; font-weight: 600;">{new_rate}%</td></tr>
+                        </table>
+                        <p><b>Reason:</b> {reason}</p>
+                        <p>Your next EMI will reflect the new amount. If you have questions, reply to this email or raise a ticket on LoanSense.</p>
+                    </div>
+                </div>
+                """
+                send_email(user.email, "🔄 Your loan has been restructured", email_html)
+            except Exception as e:
+                print(f"Email failed: {e}")
+
+        session.close()
+        return {
+            "success": True,
+            "new_emi": new_emi,
+            "new_tenure": new_tenure_total,
+            "new_rate": new_rate,
+            "message": "Loan restructured successfully"
+        }
     except Exception as e:
         session.close()
         return {"error": str(e)}

@@ -135,8 +135,35 @@ export default function LoanDetails() {
       <style>{styles}</style>
       <div className="wrap">
         <div className="container">
-          <button className="back-btn" onClick={() => navigate("/portal")}>← Back to portal</button>
-
+        <div style={{display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8}}>
+            <button className="back-btn" onClick={() => navigate("/portal")}>← Back to portal</button>
+            <button
+              onClick={async () => {
+                const token = localStorage.getItem("token");
+                try {
+                  const res = await fetch(`http://127.0.0.1:8000/loan/${loan.id}/amortization-pdf`, {
+                    headers: { Authorization: `Bearer ${token}` }
+                  });
+                  if (!res.ok) { alert("Could not generate PDF"); return; }
+                  const blob = await res.blob();
+                  const url = window.URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `loansense_loan_${loan.id}_schedule.pdf`;
+                  document.body.appendChild(a);
+                  a.click();
+                  a.remove();
+                  window.URL.revokeObjectURL(url);
+                } catch { alert("Download failed"); }
+              }}
+              style={{
+                background: "#1a1a2e", color: "#fff", border: "none",
+                padding: "9px 18px", borderRadius: 8, fontSize: 13, fontWeight: 600,
+                cursor: "pointer", fontFamily: "inherit"
+              }}>
+              📄 Download Statement
+            </button>
+          </div>
           <div className="summary-card">
             <div className="summary-header">
               <div>
