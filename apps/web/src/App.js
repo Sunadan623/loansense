@@ -103,6 +103,9 @@ export default function App() {
   const [ticketResponse, setTicketResponse] = useState({}); // {ticketId: "response text"}
   const [respondingTo, setRespondingTo] = useState(null);
   const [radar, setRadar] = useState([]);
+  const [pendingDateChanges, setPendingDateChanges] = useState([]);
+  const [dateChangeDecision, setDateChangeDecision] = useState({});  // {requestId: {decision_reason: ""}}
+  const [decidingDateChange, setDecidingDateChange] = useState(null);
   const [restructureModal, setRestructureModal] = useState(null); // {loan}
   const [restructureSim, setRestructureSim] = useState(null);
   const [restructureForm, setRestructureForm] = useState({ extend_months: 6, rate_reduction: 1, reason: "" });
@@ -188,6 +191,15 @@ export default function App() {
         if (radarData && Array.isArray(radarData.loans)) setRadar(radarData.loans);
       } catch (e) {
         console.log("Radar fetch failed");
+      }
+      try {
+        const token = localStorage.getItem("token");
+        const { data: dcData } = await axios.get("http://127.0.0.1:8000/analyst/pending-date-changes", {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (Array.isArray(dcData)) setPendingDateChanges(dcData);
+      } catch (e) {
+        console.log("Date changes fetch failed");
       }
       setResults(res);
       setLoading(false);
@@ -303,6 +315,36 @@ export default function App() {
       alert("Could not send response");
     }
     setRespondingTo(null);
+  };
+
+  const handleDateChangeDecision = async (requestId, decision) => {
+    const reasonText = (dateChangeDecision[requestId]?.decision_reason || "").trim();
+    if (decision === "reject" && reasonText.length < 10) {
+      alert("Please provide a reason for rejection (at least 10 characters)");
+      return;
+    }
+    if (decision === "approve" && !window.confirm("Approve this EMI date change? The loan's due date will shift permanently.")) {
+      return;
+    }
+    setDecidingDateChange(requestId);
+    try {
+      const token = localStorage.getItem("token");
+      const { data } = await axios.post(
+        `http://127.0.0.1:8000/analyst/decide-date-change/${requestId}`,
+        { decision, decision_reason: reasonText },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (data.success) {
+        setPendingDateChanges(pendingDateChanges.filter(r => r.id !== requestId));
+        setDateChangeDecision({ ...dateChangeDecision, [requestId]: { decision_reason: "" } });
+        alert(`✓ Request ${decision}d`);
+      } else {
+        alert(data.error || "Failed");
+      }
+    } catch (e) {
+      alert("Decision failed");
+    }
+    setDecidingDateChange(null);
   };
 
   const openRestructureModal = async (loanFromRadar) => {
@@ -501,6 +543,93 @@ export default function App() {
                   </div>
                 );
               })}
+            </div>
+          </div>
+        )}
+
+        {pendingDateChanges.length > 0 && (
+          <div className="table-card" style={{marginBottom: 20}}>
+            <div className="table-header">
+              <span className="table-title">📅 EMI Date Change Requests</span>
+              <span className="table-count" style={{background:"#cfe2ff", color:"#084298"}}>
+                {pendingDateChanges.length} pending
+              </span>
+            </div>
+            <div style={{padding: 0}}>
+              {pendingDateChanges.map(r => (
+                <div key={r.id} style={{padding:"18px 24px", borderBottom:"1px solid #f0f2f7"}}>
+                  <div style={{display:"flex", alignItems:"flex-start", gap: 12, marginBottom: 10}}>
+                    <div style={{flex: 1}}>
+                      <div style={{fontSize: 14, fontWeight: 600, color:"#1a1a2e"}}>
+                        {r.borrower_name}
+                        <span style={{fontWeight: 400, color:"#8892a4"}}> · {r.borrower_email}</span>
+                      </div>
+                      <div style={{fontSize: 12, color:"#8892a4", marginTop: 2, fontFamily:"DM Mono, monospace"}}>
+                        Loan #{r.loan_id} · {r.loan_purpose?.toUpperCase()} · ₹{r.loan_amnt.toLocaleString()} · EMI ₹{Math.round(r.installment).toLocaleString()}
+                      </div>
+                    </div>
+                    <div style={{
+                      background: "#fff3cd", color: "#856404", padding: "4px 10px",
+                      borderRadius: 10, fontSize: 11, fontWeight: 700, textTransform: "uppercase"
+                    }}>
+                      Pending
+                    </div>
+                  </div>
+
+                  <div style={{
+                    background: "#f4f6ff", border: "1px solid #d6dffb", borderRadius: 10,
+                    padding: "12px 16px", marginBottom: 12,
+                    display: "flex", alignItems: "center", gap: 16, justifyContent: "center"
+                  }}>
+                    <div style={{textAlign: "center"}}>
+                      <div style={{fontSize: 10, color: "#8892a4", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600}}>Current</div>
+                      <div style={{fontSize: 22, fontWeight: 700, color: "#1a1a2e", fontFamily: "DM Mono, monospace"}}>Day {r.current_due_day}</div>
+                    </div>
+                    <div style={{fontSize: 22, color: "#8892a4"}}>→</div>
+                    <div style={{textAlign: "center"}}>
+                      <div style={{fontSize: 10, color: "#1a7a3c", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600}}>Requested</div>
+                      <div style={{fontSize: 22, fontWeight: 700, color: "#1a7a3c", fontFamily: "DM Mono, monospace"}}>Day {r.requested_due_day}</div>
+                    </div>
+                  </div>
+
+                  <div style={{
+                    background: "#fafbfc", padding: "10px 14px", borderRadius: 8,
+                    fontSize: 13, color: "#5a6378", marginBottom: 12, lineHeight: 1.5
+                  }}>
+                    <span style={{fontWeight: 600, color: "#1a1a2e"}}>Reason: </span>{r.reason}
+                  </div>
+
+                  <textarea
+                    value={dateChangeDecision[r.id]?.decision_reason || ""}
+                    onChange={e => setDateChangeDecision({
+                      ...dateChangeDecision,
+                      [r.id]: { decision_reason: e.target.value }
+                    })}
+                    placeholder="Decision note (required for rejection, optional for approval)..."
+                    style={{
+                      width: "100%", padding: "10px 12px", border: "1px solid #e0e4ec",
+                      borderRadius: 8, fontSize: 13, fontFamily: "inherit",
+                      minHeight: 60, resize: "vertical", marginBottom: 8
+                    }} />
+
+                  <div style={{display: "flex", gap: 10, justifyContent: "flex-end"}}>
+                    <button onClick={() => handleDateChangeDecision(r.id, "reject")}
+                      disabled={decidingDateChange === r.id}
+                      style={{padding: "8px 16px", background: "#fff", color: "#c0392b",
+                        border: "1px solid #f5c6cb", borderRadius: 8, fontSize: 13, fontWeight: 600,
+                        cursor: "pointer", fontFamily: "inherit"}}>
+                      ✗ Reject
+                    </button>
+                    <button onClick={() => handleDateChangeDecision(r.id, "approve")}
+                      disabled={decidingDateChange === r.id}
+                      style={{padding: "8px 16px", background: "#1a7a3c", color: "#fff",
+                        border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600,
+                        cursor: "pointer", fontFamily: "inherit"}}>
+                      {decidingDateChange === r.id ? "..." : "✓ Approve"}
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         )}

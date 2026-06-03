@@ -86,6 +86,8 @@ class Loan(Base):
     collateral_description = Column(String, nullable=True)
     emi_adjustment = Column(Float, default=0)
     carryover_balance = Column(Float, default=0)
+    grace_days = Column(Integer, default=5)
+    emi_due_day = Column(Integer, nullable=True)
     risk_score = Column(Float, default=0)
     risk_level = Column(String, default="UNKNOWN")
     status = Column(String, default="pending")
@@ -169,6 +171,21 @@ class TicketMessage(Base):
     sender_role = Column(String, default="borrower")  # borrower or analyst
     message = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class EMIDateChangeRequest(Base):
+    __tablename__ = "emi_date_change_requests"
+    id = Column(Integer, primary_key=True, index=True)
+    loan_id = Column(Integer, ForeignKey("loans.id"))
+    user_id = Column(Integer, ForeignKey("users.id"))
+    current_due_day = Column(Integer)
+    requested_due_day = Column(Integer)
+    reason = Column(String)
+    status = Column(String, default="pending")  # pending, approved, rejected
+    decided_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+    decision_reason = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 class SupportTicket(Base):
     __tablename__ = "support_tickets"
     id = Column(Integer, primary_key=True, index=True)
@@ -571,7 +588,11 @@ def get_my_loans(current_user: dict = Depends(get_current_user)):
             "status": l.status,
             "rejection_reason": l.rejection_reason,
             "reviewed_at": str(l.reviewed_at) if l.reviewed_at else None,
-            "created_at": str(l.created_at)
+            "created_at": str(l.created_at),
+            "emi_due_day": l.emi_due_day,
+            "grace_days": l.grace_days or 5,
+            "carryover_balance": l.carryover_balance or 0,
+            "emi_adjustment": l.emi_adjustment or 0
         }
         for l in loans
     ]
@@ -1580,10 +1601,18 @@ def get_emi_status(loan_id: int, current_user: dict = Depends(get_current_user))
     days_until_due = max(0, (next_due - today).days) if next_due > today else 0
     # Effective EMI includes any carry-over adjustment from prior partial payments
     effective_emi = round(loan.installment + (loan.emi_adjustment or 0), 2)
+
+    # Grace period: RBI norm — typically 5 days after due date, no late fee
+    grace_days = loan.grace_days or 5
+    in_grace_period = 0 < days_late <= grace_days
+    grace_days_left = max(0, grace_days - days_late) if days_late > 0 else 0
+    days_past_grace = max(0, days_late - grace_days)
+
     # Calculate late fee (₹500 + 2% of EMI per week late, capped at 10% of EMI)
+    # Only after grace period expires
     late_fee = 0
-    if days_late > 0:
-        weeks_late = (days_late // 7) + 1
+    if days_past_grace > 0:
+        weeks_late = (days_past_grace // 7) + 1
         late_fee = min(500 + (weeks_late * 0.02 * effective_emi), effective_emi * 0.10)
         late_fee = round(late_fee, 2)
 
@@ -1602,12 +1631,19 @@ def get_emi_status(loan_id: int, current_user: dict = Depends(get_current_user))
             "description": f"You're {days_late} days late. A penalty of ₹{late_fee:,.0f} applies. Pay now to avoid CIBIL impact.",
             "options": ["pay_full_with_penalty", "request_deferral"]
         }
-    elif days_late > 7:
+    elif days_past_grace > 0:
         suggestion = {
             "primary": "late",
-            "title": "Payment is late",
-            "description": f"You're {days_late} days late. A penalty of ₹{late_fee:,.0f} applies.",
+            "title": "Payment is late (grace period ended)",
+            "description": f"You're {days_late} days late ({days_past_grace} days past grace). Penalty: ₹{late_fee:,.0f}",
             "options": ["pay_full_with_penalty", "pay_partial", "request_deferral"]
+        }
+    elif in_grace_period:
+        suggestion = {
+            "primary": "grace",
+            "title": f"🛡 Grace period active · {grace_days_left} day{'s' if grace_days_left != 1 else ''} left",
+            "description": f"You're {days_late} day{'s' if days_late != 1 else ''} past due, but within the {grace_days}-day grace window. No late fee yet — pay before grace ends to avoid penalty.",
+            "options": ["pay_full", "pay_partial"]
         }
     elif days_until_due > 0 and days_until_due <= 5:
         suggestion = {
@@ -1638,6 +1674,10 @@ def get_emi_status(loan_id: int, current_user: dict = Depends(get_current_user))
         "days_late": days_late,
         "days_until_due": days_until_due,
         "late_fee": late_fee,
+        "grace_days": grace_days,
+        "in_grace_period": in_grace_period,
+        "grace_days_left": grace_days_left,
+        "days_past_grace": days_past_grace,
         "total_due_today": round(effective_emi + late_fee, 2),
         "suggestion": suggestion,
         "min_partial_amount": round(effective_emi * 0.30, 2)  # minimum 30% of EMI for partial
@@ -2590,6 +2630,243 @@ def apply_restructure(loan_id: int, data: dict, current_user: dict = Depends(get
             "new_rate": new_rate,
             "message": "Loan restructured successfully"
         }
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
+# ============== EMI DATE CHANGE (Phase 9) ==============
+
+@app.post("/request-emi-date-change/{loan_id}")
+def request_emi_date_change(loan_id: int, data: dict, current_user: dict = Depends(get_current_user)):
+    """Borrower requests a permanent change to their EMI due day"""
+    requested_day = int(data.get("requested_due_day", 0))
+    reason = (data.get("reason") or "").strip()
+
+    if requested_day < 1 or requested_day > 28:
+        return {"error": "EMI due day must be between 1 and 28"}
+    if not reason or len(reason) < 10:
+        return {"error": "Please provide a reason (at least 10 characters)"}
+
+    session = Session()
+    try:
+        loan = session.query(Loan).filter(
+            Loan.id == loan_id,
+            Loan.user_id == current_user["user_id"]
+        ).first()
+        if not loan:
+            session.close()
+            return {"error": "Loan not found"}
+        if loan.status != "active":
+            session.close()
+            return {"error": "Can only change date for active loans"}
+
+        current_day = loan.emi_due_day or 1
+        if requested_day == current_day:
+            session.close()
+            return {"error": f"Loan is already due on day {current_day}"}
+
+        # Check for existing pending request
+        existing = session.query(EMIDateChangeRequest).filter(
+            EMIDateChangeRequest.loan_id == loan_id,
+            EMIDateChangeRequest.status == "pending"
+        ).first()
+        if existing:
+            session.close()
+            return {"error": "You already have a pending date change request for this loan"}
+
+        req = EMIDateChangeRequest(
+            loan_id=loan_id,
+            user_id=current_user["user_id"],
+            current_due_day=current_day,
+            requested_due_day=requested_day,
+            reason=reason,
+            status="pending"
+        )
+        session.add(req)
+        session.commit()
+
+        user = session.query(User).filter(User.id == current_user["user_id"]).first()
+        notify_all_analysts(
+            session,
+            "📅 EMI date change request",
+            f"{user.name if user else 'A borrower'} requested EMI date change from day {current_day} to day {requested_day} on {loan.purpose} loan",
+            "info",
+            "/dashboard"
+        )
+
+        session.close()
+        return {"success": True, "message": f"Request submitted. Bank will review your request to shift EMI from day {current_day} to day {requested_day}."}
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
+
+@app.get("/my-date-change-requests")
+def my_date_change_requests(current_user: dict = Depends(get_current_user)):
+    """Borrower fetches their own date change requests"""
+    session = Session()
+    reqs = session.query(EMIDateChangeRequest).filter(
+        EMIDateChangeRequest.user_id == current_user["user_id"]
+    ).order_by(EMIDateChangeRequest.created_at.desc()).all()
+
+    result = []
+    for r in reqs:
+        loan = session.query(Loan).filter(Loan.id == r.loan_id).first()
+        result.append({
+            "id": r.id,
+            "loan_id": r.loan_id,
+            "loan_purpose": loan.purpose if loan else "unknown",
+            "current_due_day": r.current_due_day,
+            "requested_due_day": r.requested_due_day,
+            "reason": r.reason,
+            "status": r.status,
+            "decision_reason": r.decision_reason,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "decided_at": r.decided_at.isoformat() if r.decided_at else None
+        })
+    session.close()
+    return result
+
+
+@app.get("/analyst/pending-date-changes")
+def pending_date_changes(current_user: dict = Depends(get_current_user)):
+    """Analyst view: all pending EMI date change requests"""
+    if current_user.get("role") != "analyst":
+        return {"error": "Not authorized"}
+
+    session = Session()
+    reqs = session.query(EMIDateChangeRequest).filter(
+        EMIDateChangeRequest.status == "pending"
+    ).order_by(EMIDateChangeRequest.created_at.desc()).all()
+
+    result = []
+    for r in reqs:
+        loan = session.query(Loan).filter(Loan.id == r.loan_id).first()
+        user = session.query(User).filter(User.id == r.user_id).first()
+        result.append({
+            "id": r.id,
+            "loan_id": r.loan_id,
+            "loan_purpose": loan.purpose if loan else "unknown",
+            "loan_amnt": loan.loan_amnt if loan else 0,
+            "installment": loan.installment if loan else 0,
+            "borrower_name": user.name if user else "Unknown",
+            "borrower_email": user.email if user else "",
+            "current_due_day": r.current_due_day,
+            "requested_due_day": r.requested_due_day,
+            "reason": r.reason,
+            "status": r.status,
+            "created_at": r.created_at.isoformat() if r.created_at else None
+        })
+    session.close()
+    return result
+
+
+@app.post("/analyst/decide-date-change/{request_id}")
+def decide_date_change(request_id: int, data: dict, current_user: dict = Depends(get_current_user)):
+    """Analyst approves or rejects an EMI date change request"""
+    if current_user.get("role") != "analyst":
+        return {"error": "Not authorized"}
+
+    decision = data.get("decision")  # "approve" or "reject"
+    decision_reason = (data.get("decision_reason") or "").strip()
+    if decision not in ["approve", "reject"]:
+        return {"error": "Decision must be 'approve' or 'reject'"}
+    if decision == "reject" and len(decision_reason) < 10:
+        return {"error": "Please provide a reason for rejection (at least 10 characters)"}
+
+    session = Session()
+    try:
+        req = session.query(EMIDateChangeRequest).filter(
+            EMIDateChangeRequest.id == request_id,
+            EMIDateChangeRequest.status == "pending"
+        ).first()
+        if not req:
+            session.close()
+            return {"error": "Request not found or already decided"}
+
+        loan = session.query(Loan).filter(Loan.id == req.loan_id).first()
+        user = session.query(User).filter(User.id == req.user_id).first()
+
+        new_status = "approved" if decision == "approve" else "rejected"
+        req.status = new_status
+        req.decided_by = current_user["user_id"]
+        req.decided_at = datetime.utcnow()
+        req.decision_reason = decision_reason if decision_reason else ("Approved by analyst" if decision == "approve" else "Rejected by analyst")
+
+        if decision == "approve" and loan:
+            # Apply the date change
+            loan.emi_due_day = req.requested_due_day
+            # Adjust reviewed_at so the next EMI calculation aligns with the new day
+            # Strategy: shift reviewed_at's day-of-month to match new emi_due_day
+            from datetime import timedelta
+            if loan.reviewed_at:
+                old_day = loan.reviewed_at.day
+                day_diff = req.requested_due_day - old_day
+                # If new day is earlier in month, shift forward to next month
+                if day_diff < 0:
+                    day_diff += 30  # rough shift to next month equivalent
+                loan.reviewed_at = loan.reviewed_at + timedelta(days=day_diff)
+
+        session.commit()
+
+        # Notify borrower
+        if decision == "approve":
+            create_notification(
+                session, req.user_id,
+                "✓ EMI date change approved",
+                f"Your {loan.purpose if loan else ''} loan EMI will now be due on day {req.requested_due_day} of each month going forward.",
+                "success",
+                f"/loan/{req.loan_id}"
+            )
+            email_subject = "✓ Your EMI date change has been approved"
+            email_html = f"""
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <div style="background: #1a7a3c; color: white; padding: 24px;">
+                    <h1 style="margin: 0;">✓ EMI Date Changed</h1>
+                </div>
+                <div style="padding: 24px; background: #f7f8fc;">
+                    <p>Hi {user.name if user else ''},</p>
+                    <p>Good news — your request to change your EMI due date has been <b>approved</b>.</p>
+                    <table style="width: 100%; background: white; border-radius: 8px; padding: 16px; margin: 16px 0;">
+                        <tr><td style="padding: 8px; color: #8892a4;">Loan</td><td style="padding: 8px; font-weight: 600;">{loan.purpose if loan else ''} (#{req.loan_id})</td></tr>
+                        <tr><td style="padding: 8px; color: #8892a4;">Old due day</td><td style="padding: 8px;">{req.current_due_day} of each month</td></tr>
+                        <tr><td style="padding: 8px; color: #8892a4;">New due day</td><td style="padding: 8px; font-weight: 600; color: #1a7a3c;">{req.requested_due_day} of each month</td></tr>
+                    </table>
+                    <p>This change takes effect from your next EMI cycle.</p>
+                </div>
+            </div>
+            """
+        else:
+            create_notification(
+                session, req.user_id,
+                "✗ EMI date change rejected",
+                f"Your request to shift EMI to day {req.requested_due_day} was rejected. Reason: {decision_reason[:80]}",
+                "error",
+                f"/loan/{req.loan_id}"
+            )
+            email_subject = "EMI date change request — update"
+            email_html = f"""
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <div style="background: #c0392b; color: white; padding: 24px;">
+                    <h1 style="margin: 0;">EMI Date Change — Not Approved</h1>
+                </div>
+                <div style="padding: 24px; background: #f7f8fc;">
+                    <p>Hi {user.name if user else ''},</p>
+                    <p>Your request to change your EMI due date to day {req.requested_due_day} was not approved.</p>
+                    <p><b>Reason:</b> {decision_reason}</p>
+                    <p>You can raise a support ticket to discuss alternative options.</p>
+                </div>
+            </div>
+            """
+
+        if user:
+            try:
+                send_email(user.email, email_subject, email_html)
+            except Exception as e:
+                print(f"Email failed: {e}")
+
+        session.close()
+        return {"success": True, "decision": decision, "message": f"Request {decision}d"}
     except Exception as e:
         session.close()
         return {"error": str(e)}

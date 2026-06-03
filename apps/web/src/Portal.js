@@ -325,10 +325,12 @@ export default function Portal() {
                 padding: 16, borderRadius: 12, marginBottom: 20,
                 background: smartModal.status.suggestion.primary === "urgent" ? "#fde8e8"
                           : smartModal.status.suggestion.primary === "late" ? "#fff3cd"
+                          : smartModal.status.suggestion.primary === "grace" ? "#e7f3ff"
                           : smartModal.status.suggestion.primary === "due_soon" ? "#fff3cd"
                           : "#d4f5e2",
                 border: "1px solid " + (smartModal.status.suggestion.primary === "urgent" ? "#f5c6cb"
                           : smartModal.status.suggestion.primary === "late" ? "#ffeaa7"
+                          : smartModal.status.suggestion.primary === "grace" ? "#b3d4ff"
                           : smartModal.status.suggestion.primary === "due_soon" ? "#ffeaa7"
                           : "#c3e6cb")
               }}>
@@ -338,6 +340,15 @@ export default function Portal() {
                 <div style={{fontSize: 13, color: "#5a6378", lineHeight: 1.5}}>
                   {smartModal.status.suggestion.description}
                 </div>
+                {smartModal.status.in_grace_period && (
+                  <div style={{
+                    marginTop: 12, padding: "10px 12px",
+                    background: "#fff", border: "1px dashed #b3d4ff",
+                    borderRadius: 8, fontSize: 12, color: "#2c5282", lineHeight: 1.5
+                  }}>
+                    💡 <b>Grace period:</b> RBI allows banks a {smartModal.status.grace_days}-day buffer after each EMI due date. Pay within this window with no late fee. {smartModal.status.grace_days_left} day{smartModal.status.grace_days_left !== 1 ? 's' : ''} remaining.
+                  </div>
+                )}
               </div>
 
               <div style={{padding: "12px 0", borderTop: "1px solid #f0f2f7", borderBottom: "1px solid #f0f2f7", marginBottom: 16}}>

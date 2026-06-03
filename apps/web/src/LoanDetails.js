@@ -69,18 +69,27 @@ export default function LoanDetails() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
+  // EMI date change
+  const [dateChangeRequests, setDateChangeRequests] = useState([]);
+  const [showDateChangeModal, setShowDateChangeModal] = useState(false);
+  const [dateChangeForm, setDateChangeForm] = useState({ requested_due_day: 15, reason: "" });
+  const [dateChangeError, setDateChangeError] = useState("");
+  const [dateChangeSubmitting, setDateChangeSubmitting] = useState(false);
+
   useEffect(() => {
     const fetch = async () => {
       const token = localStorage.getItem("token");
       try {
-        const [loansRes, paymentsRes, deferralsRes] = await Promise.all([
+        const [loansRes, paymentsRes, deferralsRes, dateChangeRes] = await Promise.all([
           axios.get("http://127.0.0.1:8000/my-loans", { headers: { Authorization: `Bearer ${token}` } }),
           axios.get(`http://127.0.0.1:8000/payment-history/${loanId}`, { headers: { Authorization: `Bearer ${token}` } }),
-          axios.get(`http://127.0.0.1:8000/my-deferrals/${loanId}`, { headers: { Authorization: `Bearer ${token}` } })
+          axios.get(`http://127.0.0.1:8000/my-deferrals/${loanId}`, { headers: { Authorization: `Bearer ${token}` } }),
+          axios.get(`http://127.0.0.1:8000/my-date-change-requests`, { headers: { Authorization: `Bearer ${token}` } })
         ]);
         const myLoan = loansRes.data.find(l => l.id === parseInt(loanId));
         setLoan(myLoan);
         setPayments(paymentsRes.data || []);
+        setDateChangeRequests((dateChangeRes.data || []).filter(r => r.loan_id === parseInt(loanId)));
         setDeferrals(deferralsRes.data || []);
       } catch (e) {
         console.log("Fetch failed", e);
@@ -89,6 +98,41 @@ export default function LoanDetails() {
     };
     fetch();
   }, [loanId]);
+
+  const submitDateChange = async () => {
+    setDateChangeError("");
+    if (dateChangeForm.requested_due_day < 1 || dateChangeForm.requested_due_day > 28) {
+      setDateChangeError("Day must be between 1 and 28");
+      return;
+    }
+    if (!dateChangeForm.reason || dateChangeForm.reason.trim().length < 10) {
+      setDateChangeError("Please give a reason (at least 10 characters)");
+      return;
+    }
+    setDateChangeSubmitting(true);
+    try {
+      const token = localStorage.getItem("token");
+      const { data } = await axios.post(
+        `http://127.0.0.1:8000/request-emi-date-change/${loanId}`,
+        { requested_due_day: parseInt(dateChangeForm.requested_due_day), reason: dateChangeForm.reason.trim() },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (data.error) {
+        setDateChangeError(data.error);
+      } else {
+        setShowDateChangeModal(false);
+        setDateChangeForm({ requested_due_day: 15, reason: "" });
+        const refresh = await axios.get(`http://127.0.0.1:8000/my-date-change-requests`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        setDateChangeRequests((refresh.data || []).filter(r => r.loan_id === parseInt(loanId)));
+        alert("✓ " + data.message);
+      }
+    } catch (e) {
+      setDateChangeError("Could not submit request");
+    }
+    setDateChangeSubmitting(false);
+  };
 
   const submitDeferral = async () => {
     setError("");
@@ -240,12 +284,65 @@ export default function LoanDetails() {
                   </span>
                 </div>
               ))
-            )}
-          </div>
-
-          <div className="section-card">
-            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: 18}}>
-              <div className="section-title" style={{margin:0}}>⏸ Deferral Requests</div>
+              )}
+              </div>
+    
+              {/* EMI Date Change Section */}
+              <div className="section-card">
+                <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: 18}}>
+                  <div className="section-title" style={{margin:0}}>📅 EMI Due Date</div>
+                  {loan.status === "active" && !dateChangeRequests.find(r => r.status === "pending") && (
+                    <button className="btn-primary" style={{padding: "9px 16px", fontSize: 13}}
+                      onClick={() => setShowDateChangeModal(true)}>
+                      + Change EMI Date
+                    </button>
+                  )}
+                </div>
+                <div style={{background: "#f4f6ff", border: "1px solid #d6dffb", borderRadius: 10, padding: 14, marginBottom: 14}}>
+                  <div style={{fontSize: 13, color: "#1a1a2e"}}>
+                    Your EMI is currently due on <b>day {loan.emi_due_day || "—"}</b> of each month.
+                  </div>
+                  <div style={{fontSize: 11, color: "#5a6378", marginTop: 4}}>
+                    Bank policy allows borrowers to shift this date to align with salary cycles (RBI-compliant).
+                  </div>
+                </div>
+                {dateChangeRequests.length === 0 ? (
+                  <div className="empty">No date change requests yet.</div>
+                ) : (
+                  dateChangeRequests.map(r => {
+                    const colors = r.status === "pending" ? {bg:"#fff3cd", text:"#856404"}
+                                : r.status === "approved" ? {bg:"#d4f5e2", text:"#1a7a3c"}
+                                : {bg:"#fde8e8", text:"#c0392b"};
+                    return (
+                      <div key={r.id} className="deferral-card">
+                        <div className="deferral-card-header">
+                          <div style={{fontSize: 13, fontWeight: 600, color:"#1a1a2e"}}>
+                            Day {r.current_due_day} → Day {r.requested_due_day}
+                          </div>
+                          <span style={{
+                            background: colors.bg, color: colors.text, padding:"3px 10px",
+                            borderRadius: 10, fontSize: 10, fontWeight: 700, textTransform:"uppercase"
+                          }}>{r.status}</span>
+                        </div>
+                        <div className="deferral-reason">{r.reason}</div>
+                        {r.decision_reason && r.status !== "pending" && (
+                          <div className="deferral-note">
+                            <b>Bank decision:</b> {r.decision_reason}
+                          </div>
+                        )}
+                        <div style={{fontSize: 11, color: "#8892a4", marginTop: 8}}>
+                          Requested on {new Date(r.created_at).toLocaleDateString("en-IN", {day:"numeric", month:"short", year:"numeric"})}
+                          {r.decided_at && ` · Decided on ${new Date(r.decided_at).toLocaleDateString("en-IN", {day:"numeric", month:"short", year:"numeric"})}`}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+    
+              <div className="section-card">
+                <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: 18}}>
+                  <div className="section-title" style={{margin:0}}>⏸ Deferral Requests</div>
               {loan.status === "active" && !hasPendingDeferral && (
                 <button className="btn-primary" style={{padding: "9px 16px", fontSize: 13}}
                   onClick={() => setShowDeferralModal(true)}>
@@ -283,12 +380,65 @@ export default function LoanDetails() {
             )}
           </div>
         </div>
-      </div>
+        </div>
 
-      {showDeferralModal && (
-        <div className="modal-overlay" onClick={() => setShowDeferralModal(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
-            <div className="modal-title">Request EMI Deferral</div>
+{showDateChangeModal && (
+  <div className="modal-overlay" onClick={() => setShowDateChangeModal(false)}>
+    <div className="modal" onClick={e => e.stopPropagation()}>
+      <div className="modal-title">📅 Change EMI Due Date</div>
+      <div style={{fontSize: 13, color: "#5a6378", marginBottom: 16, lineHeight: 1.5}}>
+        Shift your EMI date to better align with your salary or income cycle. The bank will review your request.
+      </div>
+      <div style={{background: "#f4f6ff", padding: "10px 14px", borderRadius: 8, fontSize: 12, color: "#1a1a2e", marginBottom: 14}}>
+        <b>Current:</b> Day {loan?.emi_due_day || "—"} of each month
+      </div>
+      {dateChangeError && (
+        <div style={{background: "#fde8e8", color: "#c0392b", padding: "10px 12px", borderRadius: 8, fontSize: 12, marginBottom: 12}}>
+          {dateChangeError}
+        </div>
+      )}
+      <div style={{marginBottom: 14}}>
+        <label style={{display:"block", fontSize: 12, color: "#5a6378", marginBottom: 6, fontWeight: 600}}>
+          New due day (1–28)
+        </label>
+        <input type="number" min="1" max="28"
+          value={dateChangeForm.requested_due_day}
+          onChange={e => setDateChangeForm({...dateChangeForm, requested_due_day: e.target.value})}
+          style={{width: "100%", padding: "11px 14px", border: "1px solid #e0e4ec", borderRadius: 8, fontSize: 14, fontFamily: "inherit"}} />
+        <div style={{fontSize: 11, color: "#8892a4", marginTop: 4}}>
+          Choose any day from 1 to 28 (we avoid 29-31 because not all months have those days)
+        </div>
+      </div>
+      <div style={{marginBottom: 14}}>
+        <label style={{display:"block", fontSize: 12, color: "#5a6378", marginBottom: 6, fontWeight: 600}}>
+          Reason
+        </label>
+        <textarea
+          value={dateChangeForm.reason}
+          onChange={e => setDateChangeForm({...dateChangeForm, reason: e.target.value})}
+          placeholder="e.g. I receive my salary on the 7th, so I'd like EMI due around the 10th."
+          style={{
+            width: "100%", padding: "10px 12px", border: "1px solid #e0e4ec",
+            borderRadius: 8, fontSize: 13, fontFamily: "inherit",
+            minHeight: 80, resize: "vertical"
+          }} />
+      </div>
+      <div className="modal-actions">
+        <button className="btn-secondary" onClick={() => setShowDateChangeModal(false)}>Cancel</button>
+        <button className="btn-primary" style={{flex: 1}}
+          onClick={submitDateChange}
+          disabled={dateChangeSubmitting}>
+          {dateChangeSubmitting ? "Submitting..." : "Submit Request"}
+        </button>
+      </div>
+    </div>
+  </div>
+)}
+
+{showDeferralModal && (
+  <div className="modal-overlay" onClick={() => setShowDeferralModal(false)}>
+    <div className="modal" onClick={e => e.stopPropagation()}>
+      <div className="modal-title">Request EMI Deferral</div>
             <div className="modal-sub">Bank will review your request. Approval is not guaranteed.</div>
 
             {error && <div className="error-box">{error}</div>}
