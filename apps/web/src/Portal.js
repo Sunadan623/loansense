@@ -65,7 +65,7 @@ export default function Portal() {
     setPaying(loan.id);
     try {
       const token = localStorage.getItem("token");
-      const { data: status } = await axios.get(`http://127.0.0.1:8000/emi-status/${loan.id}`, {
+      const { data: status } = await axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/emi-status/${loan.id}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       setSmartModal({ loan, status });
@@ -84,7 +84,7 @@ export default function Portal() {
     try {
       const token = localStorage.getItem("token");
       const { data: orderData } = await axios.post(
-        `http://127.0.0.1:8000/create-payment-order/${loan.id}`,
+        `${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/create-payment-order/${loan.id}`,
         { payment_type: paymentType, amount: customAmount },
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -105,7 +105,7 @@ export default function Portal() {
         handler: async (response) => {
           try {
             const { data: verifyData } = await axios.post(
-              "http://127.0.0.1:8000/verify-payment",
+              `${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/verify-payment`,
               {
                 razorpay_order_id: response.razorpay_order_id,
                 razorpay_payment_id: response.razorpay_payment_id,
@@ -145,7 +145,7 @@ export default function Portal() {
 
     const fetchLoans = async () => {
       try {
-        const { data } = await axios.get("http://127.0.0.1:8000/my-loans", {
+        const { data } = await axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/my-loans`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         if (Array.isArray(data)) setLoans(data);

@@ -116,8 +116,8 @@ export default function ApplyLoan() {
       const token = localStorage.getItem("token");
       try {
         const [typesRes, profileRes] = await Promise.all([
-          axios.get("http://127.0.0.1:8000/loan-types"),
-          axios.get("http://127.0.0.1:8000/my-profile", { headers: { Authorization: `Bearer ${token}` } })
+          axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/loan-types`),
+          axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/my-profile`, { headers: { Authorization: `Bearer ${token}` } })
         ]);
         setLoanTypes(typesRes.data);
         setProfile(profileRes.data);
@@ -154,7 +154,7 @@ export default function ApplyLoan() {
   const fetchRatePreview = async () => {
     try {
       const token = localStorage.getItem("token");
-      const { data } = await axios.post("http://127.0.0.1:8000/calculate-rate", {
+      const { data } = await axios.post(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/calculate-rate`, {
         purpose: form.purpose,
         cibil_score: parseInt(form.cibil_score),
         has_collateral: form.collateral_type && form.collateral_type !== "none"
@@ -201,7 +201,7 @@ export default function ApplyLoan() {
       if (form.gender || form.date_of_birth) {
         try {
           const token = localStorage.getItem("token");
-          await axios.post("http://127.0.0.1:8000/update-profile",
+          await axios.post(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/update-profile`,
             { gender: form.gender, date_of_birth: form.date_of_birth },
             { headers: { Authorization: `Bearer ${token}` } });
         } catch {}
@@ -217,7 +217,7 @@ export default function ApplyLoan() {
     setError("");
     try {
       const token = localStorage.getItem("token");
-      const { data } = await axios.post("http://127.0.0.1:8000/apply-loan", {
+      const { data } = await axios.post(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/apply-loan`, {
         ...form,
         cibil_score: parseInt(form.cibil_score)
       }, {

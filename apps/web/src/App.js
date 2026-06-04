@@ -114,13 +114,13 @@ export default function App() {
     const fetchAll = async () => {
       const res = {};
       try {
-        const { data: statsData } = await axios.get("http://127.0.0.1:8000/stats");
+        const { data: statsData } = await axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/stats`);
         setDbStats(statsData);
       } catch (e) { console.log("Stats fetch failed"); }
 
       try {
         const token = localStorage.getItem("token");
-        const { data: pending } = await axios.get("http://127.0.0.1:8000/pending-applications", {
+        const { data: pending } = await axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/pending-applications`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         if (Array.isArray(pending)) setPendingApps(pending);
@@ -128,7 +128,7 @@ export default function App() {
 
       try {
         const token = localStorage.getItem("token");
-        const { data: approved } = await axios.get("http://127.0.0.1:8000/approved-applications", {
+        const { data: approved } = await axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/approved-applications`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         if (Array.isArray(approved)) setApprovedApps(approved);
@@ -136,7 +136,7 @@ export default function App() {
 
       try {
         const token = localStorage.getItem("token");
-        const { data: active } = await axios.get("http://127.0.0.1:8000/active-loans", {
+        const { data: active } = await axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/active-loans`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         if (Array.isArray(active)) {
@@ -157,7 +157,7 @@ export default function App() {
                 fico_range_high: loan.fico_avg + 2,
                 fico_avg: loan.fico_avg
               };
-              const { data: pred } = await axios.post("http://127.0.0.1:8000/predict", features);
+              const { data: pred } = await axios.post(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/predict`, features);
               res[loan.id] = pred;
             } catch {
               res[loan.id] = { risk_score: loan.risk_score, risk_level: loan.risk_level, reasons: [] };
@@ -167,7 +167,7 @@ export default function App() {
       } catch (e) { console.log("Active loans fetch failed"); }
       try {
         const token = localStorage.getItem("token");
-        const { data: deferrals } = await axios.get("http://127.0.0.1:8000/pending-deferrals", {
+        const { data: deferrals } = await axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/pending-deferrals`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         if (Array.isArray(deferrals)) setPendingDeferrals(deferrals);
@@ -176,7 +176,7 @@ export default function App() {
       }
       try {
         const token = localStorage.getItem("token");
-        const { data: ticketsData } = await axios.get("http://127.0.0.1:8000/support/all-tickets", {
+        const { data: ticketsData } = await axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/support/all-tickets`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         if (Array.isArray(ticketsData)) setTickets(ticketsData);
@@ -185,7 +185,7 @@ export default function App() {
       }
       try {
         const token = localStorage.getItem("token");
-        const { data: radarData } = await axios.get("http://127.0.0.1:8000/analyst/default-radar", {
+        const { data: radarData } = await axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/analyst/default-radar`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         if (radarData && Array.isArray(radarData.loans)) setRadar(radarData.loans);
@@ -194,7 +194,7 @@ export default function App() {
       }
       try {
         const token = localStorage.getItem("token");
-        const { data: dcData } = await axios.get("http://127.0.0.1:8000/analyst/pending-date-changes", {
+        const { data: dcData } = await axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/analyst/pending-date-changes`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         if (Array.isArray(dcData)) setPendingDateChanges(dcData);
@@ -214,7 +214,7 @@ export default function App() {
     if (newSel) {
       setLoadingRec(true);
       try {
-        const { data } = await axios.post("http://127.0.0.1:8000/recommend", {
+        const { data } = await axios.post(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/recommend`, {
           name: b.borrower_name || b.name,
           risk_score: results[b.id]?.risk_score || 0,
           risk_level: results[b.id]?.risk_level || "UNKNOWN",
@@ -235,7 +235,7 @@ export default function App() {
     setActionLoading(loanId);
     try {
       const token = localStorage.getItem("token");
-      await axios.post(`http://127.0.0.1:8000/approve-loan/${loanId}`, {}, {
+      await axios.post(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/approve-loan/${loanId}`, {}, {
         headers: { Authorization: `Bearer ${token}` }
       });
       const approvedItem = pendingApps.find(p => p.id === loanId);
@@ -251,7 +251,7 @@ export default function App() {
     setActionLoading(loanId);
     try {
       const token = localStorage.getItem("token");
-      await axios.post(`http://127.0.0.1:8000/reject-loan/${loanId}`,
+      await axios.post(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/reject-loan/${loanId}`,
         { reason },
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -264,7 +264,7 @@ export default function App() {
     setActionLoading(loanId);
     try {
       const token = localStorage.getItem("token");
-      await axios.post(`http://127.0.0.1:8000/disburse-loan/${loanId}`, {}, {
+      await axios.post(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/disburse-loan/${loanId}`, {}, {
         headers: { Authorization: `Bearer ${token}` }
       });
       const disbursed = approvedApps.find(p => p.id === loanId);
@@ -278,7 +278,7 @@ export default function App() {
     setActionLoading(deferralId);
     try {
       const token = localStorage.getItem("token");
-      await axios.post(`http://127.0.0.1:8000/review-deferral/${deferralId}`,
+      await axios.post(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/review-deferral/${deferralId}`,
         { decision, note: note || "" },
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -299,7 +299,7 @@ export default function App() {
     try {
       const token = localStorage.getItem("token");
       const { data } = await axios.post(
-        `http://127.0.0.1:8000/support/respond/${ticketId}`,
+        `${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/support/respond/${ticketId}`,
         { response: response.trim(), status },
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -330,7 +330,7 @@ export default function App() {
     try {
       const token = localStorage.getItem("token");
       const { data } = await axios.post(
-        `http://127.0.0.1:8000/analyst/decide-date-change/${requestId}`,
+        `${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/analyst/decide-date-change/${requestId}`,
         { decision, decision_reason: reasonText },
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -358,7 +358,7 @@ export default function App() {
     try {
       const token = localStorage.getItem("token");
       const { data } = await axios.post(
-        "http://127.0.0.1:8000/analyst/simulate-restructure",
+        `${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/analyst/simulate-restructure`,
         { loan_id: loanId, extend_months: extendMonths, rate_reduction: rateReduction },
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -378,7 +378,7 @@ export default function App() {
     try {
       const token = localStorage.getItem("token");
       const { data } = await axios.post(
-        `http://127.0.0.1:8000/analyst/apply-restructure/${restructureModal.loan.loan_id}`,
+        `${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/analyst/apply-restructure/${restructureModal.loan.loan_id}`,
         {
           extend_months: parseInt(restructureForm.extend_months),
           rate_reduction: parseFloat(restructureForm.rate_reduction),

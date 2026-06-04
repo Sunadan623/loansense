@@ -71,7 +71,7 @@ export default function Support() {
   const fetchTickets = async () => {
     try {
       const token = localStorage.getItem("token");
-      const { data } = await axios.get("http://127.0.0.1:8000/support/my-tickets", {
+      const { data } = await axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/support/my-tickets`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (Array.isArray(data)) setTickets(data);
@@ -87,7 +87,7 @@ export default function Support() {
     setLoading(true);
     try {
       const token = localStorage.getItem("token");
-      const { data } = await axios.post("http://127.0.0.1:8000/support/create-ticket", form, {
+      const { data } = await axios.post(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/support/create-ticket`, form, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (data.error) setError(data.error);
@@ -107,7 +107,7 @@ export default function Support() {
     try {
       const token = localStorage.getItem("token");
       const { data } = await axios.post(
-        `http://127.0.0.1:8000/support/reply/${ticketId}`,
+        `${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/support/reply/${ticketId}`,
         { message: text },
         { headers: { Authorization: `Bearer ${token}` } }
       );

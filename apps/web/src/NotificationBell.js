@@ -12,7 +12,7 @@ export default function NotificationBell() {
   const fetchNotifs = async () => {
     try {
       const token = localStorage.getItem("token");
-      const { data } = await axios.get("http://127.0.0.1:8000/notifications", {
+      const { data } = await axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/notifications`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       setNotifs(data.notifications || []);
@@ -41,7 +41,7 @@ export default function NotificationBell() {
     if (newOpen && unread > 0) {
       try {
         const token = localStorage.getItem("token");
-        await axios.post("http://127.0.0.1:8000/notifications/mark-read", {}, {
+        await axios.post(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/notifications/mark-read`, {}, {
           headers: { Authorization: `Bearer ${token}` }
         });
         setUnread(0);

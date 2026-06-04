@@ -43,7 +43,7 @@ export default function AnalystCharts() {
     const fetchStats = async () => {
       try {
         const token = localStorage.getItem("token");
-        const { data } = await axios.get("http://127.0.0.1:8000/analyst/dashboard-stats", {
+        const { data } = await axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/analyst/dashboard-stats`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         if (!data.error) setStats(data);

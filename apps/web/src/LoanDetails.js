@@ -81,10 +81,10 @@ export default function LoanDetails() {
       const token = localStorage.getItem("token");
       try {
         const [loansRes, paymentsRes, deferralsRes, dateChangeRes] = await Promise.all([
-          axios.get("http://127.0.0.1:8000/my-loans", { headers: { Authorization: `Bearer ${token}` } }),
-          axios.get(`http://127.0.0.1:8000/payment-history/${loanId}`, { headers: { Authorization: `Bearer ${token}` } }),
-          axios.get(`http://127.0.0.1:8000/my-deferrals/${loanId}`, { headers: { Authorization: `Bearer ${token}` } }),
-          axios.get(`http://127.0.0.1:8000/my-date-change-requests`, { headers: { Authorization: `Bearer ${token}` } })
+          axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/my-loans`, { headers: { Authorization: `Bearer ${token}` } }),
+          axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/payment-history/${loanId}`, { headers: { Authorization: `Bearer ${token}` } }),
+          axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/my-deferrals/${loanId}`, { headers: { Authorization: `Bearer ${token}` } }),
+          axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/my-date-change-requests`, { headers: { Authorization: `Bearer ${token}` } })
         ]);
         const myLoan = loansRes.data.find(l => l.id === parseInt(loanId));
         setLoan(myLoan);
@@ -113,7 +113,7 @@ export default function LoanDetails() {
     try {
       const token = localStorage.getItem("token");
       const { data } = await axios.post(
-        `http://127.0.0.1:8000/request-emi-date-change/${loanId}`,
+        `${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/request-emi-date-change/${loanId}`,
         { requested_due_day: parseInt(dateChangeForm.requested_due_day), reason: dateChangeForm.reason.trim() },
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -122,7 +122,7 @@ export default function LoanDetails() {
       } else {
         setShowDateChangeModal(false);
         setDateChangeForm({ requested_due_day: 15, reason: "" });
-        const refresh = await axios.get(`http://127.0.0.1:8000/my-date-change-requests`, {
+        const refresh = await axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/my-date-change-requests`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         setDateChangeRequests((refresh.data || []).filter(r => r.loan_id === parseInt(loanId)));
@@ -140,7 +140,7 @@ export default function LoanDetails() {
     try {
       const token = localStorage.getItem("token");
       const { data } = await axios.post(
-        `http://127.0.0.1:8000/request-deferral/${loanId}`,
+        `${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/request-deferral/${loanId}`,
         { reason, months: parseInt(months) },
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -151,7 +151,7 @@ export default function LoanDetails() {
         setReason("");
         setMonths(1);
         // Reload deferrals
-        const deferralsRes = await axios.get(`http://127.0.0.1:8000/my-deferrals/${loanId}`, {
+        const deferralsRes = await axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/my-deferrals/${loanId}`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         setDeferrals(deferralsRes.data || []);
@@ -185,7 +185,7 @@ export default function LoanDetails() {
               onClick={async () => {
                 const token = localStorage.getItem("token");
                 try {
-                  const res = await fetch(`http://127.0.0.1:8000/loan/${loan.id}/amortization-pdf`, {
+                  const res = await fetch(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/loan/${loan.id}/amortization-pdf`, {
                     headers: { Authorization: `Bearer ${token}` }
                   });
                   if (!res.ok) { alert("Could not generate PDF"); return; }

@@ -94,7 +94,7 @@ export default function AffordabilityCoach() {
         payload.planned_tenure = parseInt(form.planned_tenure);
         payload.planned_rate = parseFloat(form.planned_rate);
       }
-      const { data } = await axios.post("http://127.0.0.1:8000/affordability-check", payload, {
+      const { data } = await axios.post(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/affordability-check`, payload, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (data.error) setError(data.error);

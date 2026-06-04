@@ -24,7 +24,7 @@ export default function SupportChat() {
     try {
       const token = localStorage.getItem("token");
       const { data } = await axios.post(
-        "http://127.0.0.1:8000/chat-support",
+        `${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/chat-support`,
         {
           message: msg,
           history: newMessages.slice(0, -1).slice(-6) // send recent context
