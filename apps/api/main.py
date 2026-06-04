@@ -10,8 +10,10 @@ import httpx
 from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, ForeignKey, Boolean, func
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from pymongo import MongoClient
-from apps.api.auth import hash_password, verify_password, create_access_token, get_current_user
-from apps.api.email_service import (
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # so 'auth' & 'email_service' import works whether we run from monorepo root or apps/api/
+from auth import hash_password, verify_password, create_access_token, get_current_user
+from email_service import (
     send_email,
     loan_approved_email,
     loan_rejected_email,
