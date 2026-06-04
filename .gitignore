@@ -5,8 +5,13 @@ __pycache__/
 .DS_Store
 .env
 apps/api/data/
-apps/api/models/
 .turbo/
 dist/
 build/
 .next/
+
+# Local backups and DB dumps (never commit)
+.env.*
+*.sql
+loansense_backup*
+loansense_clean*

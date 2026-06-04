@@ -1,0 +1,7 @@
+{
+  "xgb_weight": 0.8,
+  "lstm_weight": 0.2,
+  "xgb_auc": 0.7927,
+  "lstm_auc": 0.769,
+  "ensemble_auc": 0.7897
+}
