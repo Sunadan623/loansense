@@ -1,13 +1,34 @@
-fastapi
-uvicorn
-joblib
-pandas
-numpy
-xgboost
-shap
-scikit-learn
-psycopg2-binary
-pymongo
-sqlalchemy
-python-dotenv
-apscheduler
+# Web framework
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+python-multipart==0.0.12
+
+# Database
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
+pymongo==4.10.1
+
+# Auth
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+python-jose[cryptography]==3.3.0
+
+# ML
+numpy==1.26.4
+pandas==2.2.3
+scikit-learn==1.5.2
+xgboost==2.1.2
+shap==0.46.0
+joblib==1.4.2
+lifelines==0.30.0
+
+# External services
+httpx==0.27.2
+razorpay==1.4.2
+resend==2.4.0
+requests==2.32.3
+
+# Utilities
+python-dotenv==1.0.1
+apscheduler==3.10.4
+reportlab==4.2.5
