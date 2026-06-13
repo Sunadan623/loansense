@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
 import NotificationBell from "./NotificationBell";
+import AppShell from "./AppShell";
 import SupportChat from "./SupportChat";
 const PURPOSE_ICONS = {
   personal: "👤", home: "🏠", car: "🚗",
@@ -113,13 +114,22 @@ export default function Portal() {
               },
               { headers: { Authorization: `Bearer ${token}` } }
             );
-            if (verifyData.success) {
-              alert(`✓ ₹${Math.round(orderData.emi_amount).toLocaleString()} paid successfully!`);
+            console.log("verify-payment response:", verifyData);
+            if (verifyData && verifyData.success) {
+              const note = verifyData.carryover_note
+                ? `\n\n${verifyData.carryover_note}`
+                : "";
+              alert(`✓ ₹${Math.round(orderData.emi_amount).toLocaleString()} paid successfully!${note}`);
               window.location.reload();
             } else {
-              alert("Payment verification failed");
+              alert(verifyData?.error || "Payment verification failed");
             }
-          } catch (e) { alert("Verification error"); }
+          } catch (e) {
+            console.error("verify-payment error:", e);
+            // The payment may have actually succeeded on the backend even if the
+            // response failed to reach us. Tell the user to refresh and check.
+            alert("Payment was submitted. If it doesn't appear, please refresh the page in a moment.");
+          }
           setPaying(null);
         },
         prefill: { name: user.name, email: user.email },
@@ -179,27 +189,8 @@ export default function Portal() {
   };
 
   return (
-    <>
+    <AppShell title="Home">
       <style>{styles}</style>
-      <div className="portal">
-        <div className="nav">
-          <div className="nav-logo">
-            <div className="nav-logo-icon">
-              <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-            </div>
-            <div className="nav-logo-text">LoanSense</div>
-          </div>
-          <div className="nav-user">
-            <NotificationBell />
-            <div className="nav-avatar">{initials}</div>
-            <div>
-              <div className="nav-name">{user.name}</div>
-              <div className="nav-role">{user.role}</div>
-            </div>
-            <button className="logout-btn" onClick={handleLogout}>Sign out</button>
-          </div>
-        </div>
-
         <div className="portal-body">
           <div className="header-row">
             <div>
@@ -432,7 +423,6 @@ export default function Portal() {
           </div>
         )}
         <SupportChat />
-      </div>
-    </>
+    </AppShell>
   );
 }

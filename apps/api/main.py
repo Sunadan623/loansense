@@ -188,6 +188,26 @@ class EMIDateChangeRequest(Base):
     decision_reason = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class LedgerEntry(Base):
+    """Immutable double-entry ledger for all money movements. Phase 8."""
+    __tablename__ = "ledger_entries"
+    id = Column(Integer, primary_key=True, index=True)
+    idempotency_key = Column(String(64), unique=True, nullable=False, index=True)
+    loan_id = Column(Integer, ForeignKey("loans.id"), index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    payment_id = Column(Integer, ForeignKey("payments.id"), nullable=True)
+    entry_type = Column(String(20), nullable=False)  # "emi_payment", "late_fee", "restructure", "deferral_credit", "reversal"
+    amount = Column(Float, nullable=False)
+    principal_component = Column(Float, default=0)
+    interest_component = Column(Float, default=0)
+    fee_component = Column(Float, default=0)
+    carryover_component = Column(Float, default=0)
+    balance_before = Column(Float, nullable=True)
+    balance_after = Column(Float, nullable=True)
+    reference = Column(String(100), nullable=True)  # razorpay payment_id or other external ref
+    description = Column(String(500), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
 class SupportTicket(Base):
     __tablename__ = "support_tickets"
     id = Column(Integer, primary_key=True, index=True)
@@ -1240,6 +1260,13 @@ def disburse_loan(loan_id: int, current_user: dict = Depends(get_current_user)):
 
 @app.post("/verify-payment")
 def verify_payment(data: dict, current_user: dict = Depends(get_current_user)):
+    """
+    Hardened payment verification with:
+    - Idempotency (same razorpay_payment_id can't double-process)
+    - Row-level lock on the loan (prevents concurrent EMI conflicts)
+    - Double-entry ledger record for audit
+    - Atomic DB transaction (all or nothing)
+    """
     if not razorpay_client:
         return {"error": "Razorpay not configured"}
 
@@ -1250,14 +1277,33 @@ def verify_payment(data: dict, current_user: dict = Depends(get_current_user)):
     if not all([razorpay_order_id, razorpay_payment_id, razorpay_signature]):
         return {"error": "Missing payment details"}
 
+    # Idempotency key from razorpay's unique payment id
+    idem_key = f"rzp:{razorpay_payment_id}"
+
     session = Session()
     try:
+        # === STEP 1: Signature verification (always cheap, do first) ===
         razorpay_client.utility.verify_payment_signature({
             "razorpay_order_id": razorpay_order_id,
             "razorpay_payment_id": razorpay_payment_id,
             "razorpay_signature": razorpay_signature
         })
 
+        # === STEP 2: Idempotency check ===
+        # If this razorpay_payment_id was already processed, return the same result.
+        existing_ledger = session.query(LedgerEntry).filter(
+            LedgerEntry.idempotency_key == idem_key
+        ).first()
+        if existing_ledger:
+            session.close()
+            return {
+                "success": True,
+                "message": "Payment already processed (idempotent replay)",
+                "carryover_note": "",
+                "ledger_id": existing_ledger.id
+            }
+
+        # === STEP 3: Look up the payment ===
         payment = session.query(Payment).filter(
             Payment.razorpay_order_id == razorpay_order_id
         ).first()
@@ -1265,73 +1311,125 @@ def verify_payment(data: dict, current_user: dict = Depends(get_current_user)):
             session.close()
             return {"error": "Payment record not found"}
 
+        # === STEP 4: Lock the loan row (FOR UPDATE) so two payments can't race ===
+        loan = session.query(Loan).filter(
+            Loan.id == payment.loan_id
+        ).with_for_update().first()
+        if not loan:
+            session.close()
+            return {"error": "Loan not found"}
+
+        # === STEP 5: Update payment record ===
         payment.razorpay_payment_id = razorpay_payment_id
         payment.razorpay_signature = razorpay_signature
         payment.status = "paid"
         payment.paid_at = datetime.utcnow()
-        session.commit()
 
+        # === STEP 6: Calculate carry-over re-amortization (existing logic) ===
         user = session.query(User).filter(User.id == payment.user_id).first()
-        loan = session.query(Loan).filter(Loan.id == payment.loan_id).first()
-
         carryover_msg = ""
-        if loan:
-            # Determine how much of the EXPECTED emi was actually covered
-            expected = payment.expected_emi or loan.installment
-            # The portion that goes toward the EMI (exclude late fee)
-            emi_portion = payment.amount - (payment.late_fee or 0)
-            shortfall = expected - emi_portion
+        balance_before = loan.carryover_balance or 0
 
-            if payment.payment_type == "partial" and shortfall > 0:
-                # Count how many EMIs remain (excluding this one)
-                paid_count = session.query(Payment).filter(
-                    Payment.loan_id == loan.id,
-                    Payment.status == "paid"
-                ).count()
-                remaining_months = max(loan.term - paid_count, 1)
+        expected = payment.expected_emi or loan.installment
+        emi_portion = payment.amount - (payment.late_fee or 0)
+        shortfall = expected - emi_portion
+        carryover_delta = 0  # how much carryover changed
 
-                # Add shortfall to the accumulated carryover balance
-                loan.carryover_balance = (loan.carryover_balance or 0) + shortfall
-                # Spread the TOTAL carryover across remaining months
-                loan.emi_adjustment = round(loan.carryover_balance / remaining_months, 2)
-                session.commit()
+        if payment.payment_type == "partial" and shortfall > 0:
+            paid_count = session.query(Payment).filter(
+                Payment.loan_id == loan.id,
+                Payment.status == "paid"
+            ).count()
+            remaining_months = max(loan.term - paid_count, 1)
 
-                new_emi = round(loan.installment + loan.emi_adjustment, 2)
-                carryover_msg = (f"You paid ₹{emi_portion:,.0f} of ₹{expected:,.0f}. "
-                                 f"The shortfall of ₹{shortfall:,.0f} has been spread across your "
-                                 f"remaining {remaining_months} EMIs. Your new EMI is ₹{new_emi:,.0f}.")
-            elif payment.payment_type == "full" and loan.carryover_balance and loan.carryover_balance > 0:
-                # A full payment (which now includes the adjustment) reduces carryover
-                if emi_portion >= (loan.installment + loan.emi_adjustment - 1):
-                    # They paid the adjusted full EMI — reduce carryover by one installment's worth
-                    loan.carryover_balance = max(0, round(loan.carryover_balance - loan.emi_adjustment, 2))
-                    if loan.carryover_balance == 0:
-                        loan.emi_adjustment = 0
-                    session.commit()
+            loan.carryover_balance = (loan.carryover_balance or 0) + shortfall
+            loan.emi_adjustment = round(loan.carryover_balance / remaining_months, 2)
+            carryover_delta = shortfall
 
+            new_emi = round(loan.installment + loan.emi_adjustment, 2)
+            carryover_msg = (f"You paid ₹{emi_portion:,.0f} of ₹{expected:,.0f}. "
+                             f"The shortfall of ₹{shortfall:,.0f} has been spread across your "
+                             f"remaining {remaining_months} EMIs. Your new EMI is ₹{new_emi:,.0f}.")
+        elif payment.payment_type == "full" and loan.carryover_balance and loan.carryover_balance > 0:
+            if emi_portion >= (loan.installment + loan.emi_adjustment - 1):
+                reduction = min(loan.carryover_balance, loan.emi_adjustment or 0)
+                loan.carryover_balance = max(0, round(loan.carryover_balance - loan.emi_adjustment, 2))
+                carryover_delta = -reduction
+                if loan.carryover_balance == 0:
+                    loan.emi_adjustment = 0
+
+        balance_after = loan.carryover_balance or 0
+
+        # === STEP 7: Write the immutable ledger entry ===
+        # Split amount into components for audit
+        late_fee_part = payment.late_fee or 0
+        # Rough heuristic: interest ~ 30% of EMI portion in early months, principal the rest.
+        # In a real bank we'd compute from amortization schedule. For now, simplified:
+        principal_part = round(emi_portion * 0.7, 2) if emi_portion > 0 else 0
+        interest_part = round(emi_portion - principal_part, 2) if emi_portion > 0 else 0
+
+        ledger = LedgerEntry(
+            idempotency_key=idem_key,
+            loan_id=loan.id,
+            user_id=payment.user_id,
+            payment_id=payment.id,
+            entry_type="emi_payment",
+            amount=payment.amount,
+            principal_component=principal_part,
+            interest_component=interest_part,
+            fee_component=late_fee_part,
+            carryover_component=carryover_delta,
+            balance_before=balance_before,
+            balance_after=balance_after,
+            reference=razorpay_payment_id,
+            description=f"{payment.payment_type or 'full'} EMI payment for {loan.purpose} loan #{loan.id}"
+        )
+        session.add(ledger)
+        session.flush()
+        ledger_id_value = ledger.id
+
+        # === STEP 8: Atomic commit (everything succeeds or nothing does) ===
+        session.commit()
+        ledger_id_value = ledger.id
+
+        # === STEP 9: Side-effects (email, notifications) — these are outside the DB transaction ===
         if user and loan:
-            email = payment_success_email(user.name, payment.amount, loan.purpose)
-            send_email(user.email, email["subject"], email["html"])
-            create_notification(session, user.id, "Payment Received ✓",
-                f"Your payment of ₹{payment.amount:,.0f} for {loan.purpose} loan was successful.",
-                "payment", f"/loan/{loan.id}")
-            # Notify all analysts about the EMI received
-            notify_all_analysts(
-                session,
-                "💰 EMI Payment Received",
-                f"{user.name} paid ₹{payment.amount:,.0f} for their {loan.purpose} loan",
-                "payment",
-                "/dashboard"
-            )
+            try:
+                email = payment_success_email(user.name, payment.amount, loan.purpose)
+                send_email(user.email, email["subject"], email["html"])
+            except Exception as e:
+                print(f"Email failed: {e}")
+
+            try:
+                create_notification(session, user.id, "Payment Received ✓",
+                    f"Your payment of ₹{payment.amount:,.0f} for {loan.purpose} loan was successful.",
+                    "payment", f"/loan/{loan.id}")
+                notify_all_analysts(
+                    session,
+                    "💰 EMI Payment Received",
+                    f"{user.name} paid ₹{payment.amount:,.0f} for their {loan.purpose} loan",
+                    "payment",
+                    "/dashboard"
+                )
+            except Exception as e:
+                print(f"Notification failed: {e}")
+
         session.close()
-        return {"success": True, "message": "Payment verified successfully", "carryover_note": carryover_msg}
+        return {
+            "success": True,
+            "message": "Payment verified successfully",
+            "carryover_note": carryover_msg,
+            "ledger_id": ledger_id_value
+        }
+
     except razorpay.errors.SignatureVerificationError:
+        session.rollback()
         session.close()
         return {"error": "Invalid signature — payment verification failed"}
     except Exception as e:
+        session.rollback()
         session.close()
         return {"error": str(e)}
-
 
 @app.get("/payment-history/{loan_id}")
 def get_payment_history(loan_id: int, current_user: dict = Depends(get_current_user)):

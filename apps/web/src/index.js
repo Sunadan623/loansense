@@ -10,6 +10,7 @@ import LoanDetails from "./LoanDetails";
 import AffordabilityCoach from "./AffordabilityCoach";
 import FAQ from "./FAQ";
 import Support from "./Support";
+import UpcomingEMIs from "./UpcomingEMIs";
 const isLoggedIn = () => !!localStorage.getItem("token");
 const getRole = () => {
   try {
@@ -45,6 +46,7 @@ root.render(
       <Route path="*" element={<Navigate to="/portal" replace />} />
       <Route path="/faq" element={<ProtectedRoute><FAQ /></ProtectedRoute>} />
       <Route path="/support" element={<ProtectedRoute><Support /></ProtectedRoute>} />
+      <Route path="/upcoming" element={<ProtectedRoute><UpcomingEMIs /></ProtectedRoute>} />
     </Routes>
   </BrowserRouter>
 );
