@@ -1,6 +1,7 @@
 import { useState } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
+import AppShell from "./AppShell";
 
 const styles = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
@@ -106,11 +107,10 @@ export default function AffordabilityCoach() {
   };
 
   return (
-    <>
+    <AppShell title="Affordability Coach">
       <style>{styles}</style>
       <div className="wrap">
         <div className="container">
-          <button className="back-btn" onClick={() => navigate("/portal")}>← Back to portal</button>
 
           <div className="hero">
             <h1>💡 Affordability Coach</h1>
@@ -248,6 +248,6 @@ export default function AffordabilityCoach() {
           )}
         </div>
       </div>
-    </>
+    </AppShell>
   );
 }

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import NotificationBell from "./NotificationBell";
 
@@ -7,26 +8,40 @@ const shellStyles = `
   .shell-sidebar {
     width: 232px; background: #1a1a2e; color: #fff; display: flex; flex-direction: column;
     position: fixed; top: 0; left: 0; bottom: 0; z-index: 100; padding: 22px 0;
+    transition: width 0.2s ease;
   }
-  .shell-logo { display: flex; align-items: center; gap: 10px; padding: 0 22px 24px; }
-  .shell-logo-icon { width: 32px; height: 32px; background: #fff; border-radius: 9px; display: flex; align-items: center; justify-content: center; }
+  .shell-sidebar.collapsed { width: 64px; }
+  .shell-logo { display: flex; align-items: center; gap: 10px; padding: 0 22px 24px; white-space: nowrap; overflow: hidden; }
+  .shell-sidebar.collapsed .shell-logo { padding: 0 0 24px; justify-content: center; }
+  .shell-logo-icon { width: 32px; height: 32px; background: #fff; border-radius: 9px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
   .shell-logo-icon svg { width: 18px; height: 18px; fill: none; stroke: #1a1a2e; stroke-width: 2; }
   .shell-logo-text { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
+  .shell-sidebar.collapsed .shell-logo-text { display: none; }
   .shell-nav { flex: 1; padding: 8px 12px; display: flex; flex-direction: column; gap: 2px; }
+  .shell-sidebar.collapsed .shell-nav { padding: 8px 8px; }
   .shell-nav-item {
     display: flex; align-items: center; gap: 12px; padding: 11px 14px; border-radius: 9px;
     font-size: 14px; font-weight: 500; color: #a9b0c5; cursor: pointer; border: none; background: none;
-    font-family: inherit; text-align: left; width: 100%; transition: all 0.15s;
+    font-family: inherit; text-align: left; width: 100%; transition: all 0.15s; white-space: nowrap; overflow: hidden;
   }
   .shell-nav-item:hover { background: rgba(255,255,255,0.06); color: #fff; }
   .shell-nav-item.active { background: rgba(255,255,255,0.12); color: #fff; font-weight: 600; }
-  .shell-nav-icon { font-size: 17px; width: 20px; text-align: center; }
-  .shell-nav-section { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: #5a6378; padding: 16px 14px 6px; font-weight: 600; }
-  .shell-main { flex: 1; margin-left: 232px; display: flex; flex-direction: column; min-height: 100vh; }
+  .shell-nav-icon { font-size: 17px; width: 20px; text-align: center; flex-shrink: 0; }
+  .shell-sidebar.collapsed .shell-nav-item { justify-content: center; padding: 11px; }
+  .shell-sidebar.collapsed .shell-nav-label { display: none; }
+  .shell-main { flex: 1; margin-left: 232px; display: flex; flex-direction: column; min-height: 100vh; transition: margin-left 0.2s ease; }
+  .shell-main.collapsed { margin-left: 64px; }
   .shell-topbar {
     height: 64px; background: #fff; border-bottom: 1px solid #eaedf3; display: flex;
     align-items: center; justify-content: space-between; padding: 0 28px; position: sticky; top: 0; z-index: 50;
   }
+  .shell-topbar-left { display: flex; align-items: center; gap: 14px; }
+  .shell-toggle {
+    background: none; border: none; cursor: pointer; font-size: 20px; color: #5a6378;
+    width: 38px; height: 38px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s;
+  }
+  .shell-toggle:hover { background: #f0f2f7; color: #1a1a2e; }
   .shell-topbar-title { font-size: 16px; font-weight: 600; color: #1a1a2e; }
   .shell-topbar-right { display: flex; align-items: center; gap: 14px; }
   .shell-avatar { width: 36px; height: 36px; border-radius: 50%; background: #1a1a2e; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 14px; }
@@ -38,9 +53,11 @@ const shellStyles = `
   .shell-content { flex: 1; padding: 28px; }
   @media (max-width: 880px) {
     .shell-sidebar { width: 64px; }
-    .shell-logo-text, .shell-nav-item span:not(.shell-nav-icon), .shell-nav-section { display: none; }
+    .shell-logo-text, .shell-nav-label { display: none; }
     .shell-main { margin-left: 64px; }
     .shell-nav-item { justify-content: center; padding: 11px; }
+    .shell-logo { padding: 0 0 24px; justify-content: center; }
+    .shell-user-meta { display: none; }
   }
 `;
 
@@ -60,6 +77,18 @@ const ANALYST_NAV = [
 export default function AppShell({ children, title }) {
   const navigate = useNavigate();
   const location = useLocation();
+  const [collapsed, setCollapsed] = useState(() => {
+    return localStorage.getItem("shellCollapsed") === "true";
+  });
+
+  const toggle = () => {
+    setCollapsed(prev => {
+      const next = !prev;
+      localStorage.setItem("shellCollapsed", String(next));
+      return next;
+    });
+  };
+
   let user = {};
   try { user = JSON.parse(localStorage.getItem("user") || "{}"); } catch {}
   const role = user.role || "borrower";
@@ -81,7 +110,7 @@ export default function AppShell({ children, title }) {
     <>
       <style>{shellStyles}</style>
       <div className="shell-root">
-        <aside className="shell-sidebar">
+        <aside className={`shell-sidebar ${collapsed ? "collapsed" : ""}`}>
           <div className="shell-logo">
             <div className="shell-logo-icon">
               <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
@@ -94,17 +123,21 @@ export default function AppShell({ children, title }) {
                 key={item.path}
                 className={`shell-nav-item ${isActive(item.path) ? "active" : ""}`}
                 onClick={() => navigate(item.path)}
+                title={item.label}
               >
                 <span className="shell-nav-icon">{item.icon}</span>
-                <span>{item.label}</span>
+                <span className="shell-nav-label">{item.label}</span>
               </button>
             ))}
           </nav>
         </aside>
 
-        <div className="shell-main">
+        <div className={`shell-main ${collapsed ? "collapsed" : ""}`}>
           <header className="shell-topbar">
-            <div className="shell-topbar-title">{title || ""}</div>
+            <div className="shell-topbar-left">
+              <button className="shell-toggle" onClick={toggle} title={collapsed ? "Expand sidebar" : "Collapse sidebar"}>☰</button>
+              <div className="shell-topbar-title">{title || ""}</div>
+            </div>
             <div className="shell-topbar-right">
               <NotificationBell />
               <div className="shell-avatar">{initials}</div>

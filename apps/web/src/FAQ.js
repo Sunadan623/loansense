@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import AppShell from "./AppShell";
 
 const styles = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
@@ -84,11 +85,10 @@ export default function FAQ() {
   });
 
   return (
-    <>
+    <AppShell title="Help & FAQ">
       <style>{styles}</style>
       <div className="wrap">
         <div className="container">
-          <button className="back-btn" onClick={() => navigate(-1)}>← Back</button>
 
           <div className="hero">
             <h1>❓ Help Center</h1>
@@ -128,6 +128,6 @@ export default function FAQ() {
           </div>
         </div>
       </div>
-    </>
+    </AppShell>
   );
 }

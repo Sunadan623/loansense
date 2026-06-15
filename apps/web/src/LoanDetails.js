@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import axios from "axios";
 import { useNavigate, useParams } from "react-router-dom";
+import AppShell from "./AppShell";
 
 const PURPOSE_ICONS = {
   personal: "👤", home: "🏠", car: "🚗",
@@ -163,8 +164,8 @@ export default function LoanDetails() {
     setSubmitting(false);
   };
 
-  if (loading) return <div style={{padding: 60, textAlign: "center"}}>Loading...</div>;
-  if (!loan) return <div style={{padding: 60, textAlign: "center"}}>Loan not found</div>;
+  if (loading) return <AppShell title="Loan Details"><div style={{padding: 60, textAlign: "center"}}>Loading...</div></AppShell>;
+  if (!loan) return <AppShell title="Loan Details"><div style={{padding: 60, textAlign: "center"}}>Loan not found</div></AppShell>;
 
   const paidCount = payments.filter(p => p.status === "paid").length;
   const totalPaid = payments.filter(p => p.status === "paid").reduce((s, p) => s + p.amount, 0);
@@ -175,7 +176,7 @@ export default function LoanDetails() {
                      : {bg:"#f0f2f7", text:"#5a6378"};
 
   return (
-    <>
+    <AppShell title="Loan Details">
       <style>{styles}</style>
       <div className="wrap">
         <div className="container">
@@ -470,6 +471,6 @@ export default function LoanDetails() {
           </div>
         </div>
       )}
-    </>
+    </AppShell>
   );
 }
