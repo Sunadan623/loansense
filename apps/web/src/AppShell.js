@@ -65,6 +65,7 @@ const BORROWER_NAV = [
   { label: "Home", icon: "🏠", path: "/portal" },
   { label: "My Loans", icon: "💳", path: "/portal#loans" },
   { label: "Upcoming EMIs", icon: "📅", path: "/upcoming" },
+  { label: "Transactions", icon: "📒", path: "/transactions" },
   { label: "Affordability", icon: "💡", path: "/affordability" },
   { label: "Support", icon: "🎫", path: "/support" },
   { label: "FAQ", icon: "❓", path: "/faq" },

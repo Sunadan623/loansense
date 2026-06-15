@@ -1454,6 +1454,58 @@ def get_payment_history(loan_id: int, current_user: dict = Depends(get_current_u
     return result
 
 
+@app.get("/my-transactions")
+def get_my_transactions(current_user: dict = Depends(get_current_user)):
+    """Unified ledger across all the borrower's loans. Powers the Transactions page."""
+    session = Session()
+    try:
+        entries = session.query(LedgerEntry).filter(
+            LedgerEntry.user_id == current_user["user_id"]
+        ).order_by(LedgerEntry.created_at.desc()).all()
+
+        loan_ids = list({e.loan_id for e in entries})
+        loans = session.query(Loan).filter(Loan.id.in_(loan_ids)).all() if loan_ids else []
+        purpose_by_id = {l.id: l.purpose for l in loans}
+
+        result = []
+        for e in entries:
+            result.append({
+                "id": e.id,
+                "loan_id": e.loan_id,
+                "loan_purpose": purpose_by_id.get(e.loan_id, "loan"),
+                "entry_type": e.entry_type,
+                "amount": e.amount,
+                "principal": e.principal_component or 0,
+                "interest": e.interest_component or 0,
+                "fee": e.fee_component or 0,
+                "carryover": e.carryover_component or 0,
+                "balance_after": e.balance_after,
+                "reference": e.reference,
+                "description": e.description,
+                "created_at": str(e.created_at),
+            })
+
+        total_paid = sum(e.amount for e in entries)
+        total_principal = sum((e.principal_component or 0) for e in entries)
+        total_interest = sum((e.interest_component or 0) for e in entries)
+        total_fees = sum((e.fee_component or 0) for e in entries)
+
+        session.close()
+        return {
+            "transactions": result,
+            "summary": {
+                "count": len(result),
+                "total_paid": round(total_paid, 2),
+                "total_principal": round(total_principal, 2),
+                "total_interest": round(total_interest, 2),
+                "total_fees": round(total_fees, 2),
+            }
+        }
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
+
 # ============== DEFERRAL ENDPOINTS ==============
 
 @app.post("/request-deferral/{loan_id}")
