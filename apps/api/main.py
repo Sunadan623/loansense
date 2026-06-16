@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 from datetime import datetime
 import httpx
-from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, ForeignKey, Boolean, func
+from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, ForeignKey, Boolean, func, JSON
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from pymongo import MongoClient
 import sys
@@ -206,6 +206,18 @@ class LedgerEntry(Base):
     balance_after = Column(Float, nullable=True)
     reference = Column(String(100), nullable=True)  # razorpay payment_id or other external ref
     description = Column(String(500), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+class Event(Base):
+    """Behavioral event log — every meaningful user action. Powers analytics + ML monitoring."""
+    __tablename__ = "events"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    event_type = Column(String(50), nullable=False, index=True)
+    event_category = Column(String(30), index=True)
+    loan_id = Column(Integer, nullable=True)
+    event_metadata = Column("metadata", JSON, nullable=True)
+    ip_address = Column(String(50), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 class SupportTicket(Base):
@@ -574,7 +586,9 @@ def login(data: dict):
             "token": token,
             "user": {"id": user.id, "email": user.email, "name": user.name, "role": user.role}
         }
+        uid_ev, role_ev = user.id, user.role
         session.close()
+        log_event(user_id=uid_ev, event_type="login", event_category="auth", metadata={"role": role_ev})
         return result
     except Exception as e:
         session.close()
@@ -858,6 +872,20 @@ def affordability_check(data: dict, current_user: dict = Depends(get_current_use
             "safer_emi": round(safe_new_emi, 2)
         }
 
+    log_event(
+        user_id=current_user["user_id"],
+        event_type="affordability_check",
+        event_category="research",
+        metadata={
+            "annual_income": annual_income,
+            "monthly_essentials": monthly_essentials,
+            "existing_emis": existing_emis,
+            "dependents": dependents,
+            "checked_specific_loan": bool(planned_loan_amount > 0 and planned_tenure > 0 and planned_rate > 0),
+            "planned_loan_amount": planned_loan_amount,
+            "verdict": advice.get("planned_check", {}).get("verdict"),
+        },
+    )
     return advice
 
 @app.get("/loan-types")
@@ -965,6 +993,24 @@ def apply_loan(data: dict, current_user: dict = Depends(get_current_user)):
         session.commit()
         session.refresh(loan)
         loan_id = loan.id
+
+        log_event(
+            user_id=current_user["user_id"],
+            event_type="loan_application_submitted",
+            event_category="loan",
+            loan_id=loan_id,
+            metadata={
+                "purpose": purpose,
+                "loan_amnt": loan_amnt,
+                "term": term,
+                "cibil_score": cibil_score,
+                "int_rate": int_rate,
+                "risk_score": round(adjusted_risk, 4),
+                "risk_level": risk_level,
+                "has_collateral": bool(has_collateral),
+            },
+        )
+
         # Notify all analysts about the new application
         borrower_name = user.name if user else "A borrower"
         notify_all_analysts(
@@ -1392,6 +1438,21 @@ def verify_payment(data: dict, current_user: dict = Depends(get_current_user)):
         session.commit()
         ledger_id_value = ledger.id
 
+        log_event(
+            user_id=payment.user_id,
+            event_type="payment_succeeded",
+            event_category="payment",
+            loan_id=loan.id,
+            metadata={
+                "amount": payment.amount,
+                "payment_type": payment.payment_type or "full",
+                "principal": principal_part,
+                "interest": interest_part,
+                "fee": late_fee_part,
+                "razorpay_payment_id": razorpay_payment_id,
+            },
+        )
+
         # === STEP 9: Side-effects (email, notifications) — these are outside the DB transaction ===
         if user and loan:
             try:
@@ -1553,6 +1614,19 @@ def request_deferral(loan_id: int, data: dict, current_user: dict = Depends(get_
         session.commit()
         session.refresh(deferral)
         deferral_id = deferral.id
+
+        log_event(
+            user_id=current_user["user_id"],
+            event_type="deferral_requested",
+            event_category="distress",
+            loan_id=loan_id,
+            metadata={
+                "months": months,
+                "loan_purpose": loan.purpose,
+                "reason_length": len(reason),
+            },
+        )
+
         # Notify all analysts about the deferral request
         borrower = session.query(User).filter(User.id == current_user["user_id"]).first()
         borrower_name = borrower.name if borrower else "A borrower"
@@ -1956,6 +2030,29 @@ def create_notification(session, user_id, title, message, ntype="info", link=Non
         session.commit()
     except Exception as e:
         print(f"Notification failed: {e}")
+
+def log_event(user_id, event_type, event_category=None, loan_id=None, metadata=None, ip_address=None):
+    """Fire-and-forget behavioral event logger. Uses its own session; never breaks the caller."""
+    s = Session()
+    try:
+        ev = Event(
+            user_id=user_id,
+            event_type=event_type,
+            event_category=event_category,
+            loan_id=loan_id,
+            event_metadata=metadata,
+            ip_address=ip_address,
+        )
+        s.add(ev)
+        s.commit()
+    except Exception as e:
+        print(f"Event log failed ({event_type}): {e}")
+        try:
+            s.rollback()
+        except Exception:
+            pass
+    finally:
+        s.close()
 
 def notify_all_analysts(session, title, message, ntype="info", link=None):
     """Send a notification to every analyst user."""
