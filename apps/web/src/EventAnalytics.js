@@ -15,6 +15,14 @@ ChartJS.register(
 
 const API = process.env.REACT_APP_API_URL || "http://127.0.0.1:8000";
 
+const fmtMoney = (n) => {
+  n = n || 0;
+  if (n >= 10000000) return "₹" + (n/10000000).toFixed(2) + "Cr";
+  if (n >= 100000) return "₹" + (n/100000).toFixed(2) + "L";
+  if (n >= 1000) return "₹" + (n/1000).toFixed(1) + "K";
+  return "₹" + Math.round(n);
+};
+
 const EVENT_LABELS = {
   login: "Logins",
   affordability_check: "Affordability Checks",
@@ -66,6 +74,7 @@ function ChartCard({ title, children }) {
 
 export default function EventAnalytics() {
   const [data, setData] = useState(null);
+  const [pi, setPi] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -76,6 +85,10 @@ export default function EventAnalytics() {
           headers: { Authorization: `Bearer ${token}` }
         });
         setData(data);
+        const piRes = await axios.get(`${API}/analyst/portfolio-intelligence`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        setPi(piRes.data);
       } catch (e) {
         console.error("Failed to load analytics", e);
         setData({ error: true });
@@ -149,6 +162,79 @@ export default function EventAnalytics() {
       <div className="ea-intro">
         Behavioral analytics from the live event stream. Every login, application, payment, and deferral is captured and analyzed here in real time.
       </div>
+
+      {pi && !pi.error && (
+        <>
+          <div style={{fontSize: 15, fontWeight: 700, color: "#1a1a2e", margin: "4px 0 14px"}}>📊 Portfolio Intelligence</div>
+          <div className="ea-stats">
+            <div className="ea-stat">
+              <div className="ea-stat-label">Total Exposure</div>
+              <div className="ea-stat-value">{fmtMoney(pi.total_exposure)}</div>
+            </div>
+            <div className="ea-stat">
+              <div className="ea-stat-label">Collection Rate</div>
+              <div className="ea-stat-value" style={{color: pi.collection.rate >= 80 ? "#1a7a3c" : pi.collection.rate >= 60 ? "#856404" : "#c0392b"}}>{pi.collection.rate}%</div>
+            </div>
+            <div className="ea-stat">
+              <div className="ea-stat-label">EMI Backlog</div>
+              <div className="ea-stat-value" style={{color: pi.backlog.total > 0 ? "#c0392b" : "#1a1a2e"}}>{fmtMoney(pi.backlog.total)}</div>
+            </div>
+            <div className="ea-stat">
+              <div className="ea-stat-label">Partial Payments</div>
+              <div className="ea-stat-value">{pi.payment_health.partial}/{pi.payment_health.total}</div>
+            </div>
+          </div>
+
+          <div className="ea-grid">
+            <ChartCard title="💰 Risk-Weighted Exposure">
+              <div style={{height: 240}}>
+                <Bar
+                  data={{
+                    labels: ["Low", "Medium", "High"],
+                    datasets: [{
+                      label: "Exposure",
+                      data: [pi.risk_exposure.LOW, pi.risk_exposure.MEDIUM, pi.risk_exposure.HIGH],
+                      backgroundColor: ["#1a7a3c", "#daa520", "#c0392b"],
+                      borderRadius: 6,
+                    }]
+                  }}
+                  options={{responsive: true, maintainAspectRatio: false, plugins: {legend: {display: false}}, scales: {y: {beginAtZero: true, ticks: {callback: v => "₹" + (v/100000) + "L"}}}}}
+                />
+              </div>
+            </ChartCard>
+            <ChartCard title="✅ Payment Health">
+              <div style={{height: 240}}>
+                <Bar
+                  data={{
+                    labels: ["Full", "Partial"],
+                    datasets: [{
+                      label: "Payments",
+                      data: [pi.payment_health.full, pi.payment_health.partial],
+                      backgroundColor: ["#16a085", "#e67e22"],
+                      borderRadius: 6,
+                    }]
+                  }}
+                  options={{responsive: true, maintainAspectRatio: false, plugins: {legend: {display: false}}, scales: {y: {beginAtZero: true, ticks: {precision: 0}}}}}
+                />
+              </div>
+            </ChartCard>
+          </div>
+
+          <ChartCard title="🏆 Top Borrowers by Exposure">
+            <div style={{display: "flex", flexDirection: "column", gap: 8}}>
+              {pi.top_borrowers.map((b, i) => (
+                <div key={b.user_id} style={{display: "flex", alignItems: "center", gap: 12, padding: "8px 0", borderBottom: i < pi.top_borrowers.length-1 ? "1px solid #f4f6fa" : "none"}}>
+                  <div style={{width: 24, fontWeight: 700, color: "#8892a4", fontFamily: "DM Mono, monospace"}}>{i+1}</div>
+                  <div style={{flex: 1, fontWeight: 600, color: "#1a1a2e"}}>{b.name}</div>
+                  <div style={{fontFamily: "DM Mono, monospace", fontWeight: 700, color: "#1a1a2e"}}>{fmtMoney(b.exposure)}</div>
+                </div>
+              ))}
+            </div>
+          </ChartCard>
+
+          <div style={{fontSize: 15, fontWeight: 700, color: "#1a1a2e", margin: "24px 0 14px"}}>📡 Behavioral Event Stream</div>
+        </>
+      )}
 
       <div className="ea-stats">
         <div className="ea-stat">

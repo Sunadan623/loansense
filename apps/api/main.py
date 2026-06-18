@@ -1372,6 +1372,75 @@ Keep it under 180 words, professional, plain prose. No markdown headers, no bull
             pass
         return {"error": str(e)}
 
+@app.get("/analyst/portfolio-intelligence")
+def analyst_portfolio_intelligence(current_user: dict = Depends(get_current_user)):
+    """Real portfolio analytics from loans/payments/ledger. Analyst-only."""
+    if current_user.get("role") != "analyst":
+        return {"error": "Not authorized"}
+    session = Session()
+    try:
+        from collections import defaultdict
+        loans = session.query(Loan).all()
+        active = [l for l in loans if l.status == "active"]
+        payments = session.query(Payment).all()
+        paid = [p for p in payments if p.status == "paid"]
+
+        # 1. Payment health: full vs partial
+        full_count = sum(1 for p in paid if (p.payment_type or "full") == "full")
+        partial_count = sum(1 for p in paid if p.payment_type == "partial")
+
+        # 2. Collection efficiency
+        total_collected = sum(p.amount for p in paid)
+        total_expected = sum((p.expected_emi or 0) for p in paid)
+        collection_rate = round((total_collected / total_expected * 100), 1) if total_expected > 0 else 0
+
+        # 3. Portfolio backlog (carryover arrears)
+        total_backlog = sum((l.carryover_balance or 0) for l in active)
+        loans_with_backlog = sum(1 for l in active if (l.carryover_balance or 0) > 0)
+
+        # 4. Exposure concentration — top 5 borrowers
+        exposure_by_user = defaultdict(float)
+        for l in active:
+            exposure_by_user[l.user_id] += l.loan_amnt
+        top_user_ids = sorted(exposure_by_user, key=lambda u: -exposure_by_user[u])[:5]
+        users = session.query(User).filter(User.id.in_(top_user_ids)).all() if top_user_ids else []
+        name_by_id = {u.id: u.name for u in users}
+        top_borrowers = [{
+            "user_id": uid,
+            "name": name_by_id.get(uid, f"User {uid}"),
+            "exposure": round(exposure_by_user[uid], 2),
+        } for uid in top_user_ids]
+
+        # 5. Risk-weighted exposure (₹ in each risk band)
+        risk_exposure = {"LOW": 0.0, "MEDIUM": 0.0, "HIGH": 0.0}
+        for l in active:
+            lvl = l.risk_level if l.risk_level in risk_exposure else "MEDIUM"
+            risk_exposure[lvl] += l.loan_amnt
+        risk_exposure = {k: round(v, 2) for k, v in risk_exposure.items()}
+
+        total_exposure = sum(l.loan_amnt for l in active)
+
+        session.close()
+        return {
+            "payment_health": {"full": full_count, "partial": partial_count, "total": len(paid)},
+            "collection": {
+                "collected": round(total_collected, 2),
+                "expected": round(total_expected, 2),
+                "rate": collection_rate,
+            },
+            "backlog": {
+                "total": round(total_backlog, 2),
+                "loans_affected": loans_with_backlog,
+            },
+            "top_borrowers": top_borrowers,
+            "risk_exposure": risk_exposure,
+            "total_exposure": round(total_exposure, 2),
+            "active_loans": len(active),
+        }
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
 @app.get("/analyst/event-analytics")
 def analyst_event_analytics(current_user: dict = Depends(get_current_user)):
     """Behavioral analytics computed from the events table. Analyst-only."""
