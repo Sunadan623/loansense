@@ -1244,13 +1244,25 @@ def analyst_customer_detail(customer_id: int, current_user: dict = Depends(get_c
         total_paid = sum(p.amount for p in paid)
 
         # Support tickets
-        tickets = session.query(SupportTicket).filter(SupportTicket.user_id == customer_id).all()
-        tickets_out = [{
-            "id": t.id,
-            "subject": t.subject,
-            "status": t.status,
-            "created_at": str(t.created_at) if t.created_at else None,
-        } for t in tickets]
+        tickets = session.query(SupportTicket).filter(SupportTicket.user_id == customer_id).order_by(SupportTicket.created_at.desc()).all()
+        tickets_out = []
+        for t in tickets:
+            msgs = session.query(TicketMessage).filter(
+                TicketMessage.ticket_id == t.id
+            ).order_by(TicketMessage.created_at.asc()).all()
+            thread = [{
+                "id": m.id,
+                "sender_role": m.sender_role,
+                "message": m.message,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            } for m in msgs]
+            tickets_out.append({
+                "id": t.id,
+                "subject": t.subject,
+                "status": t.status,
+                "thread": thread,
+                "created_at": str(t.created_at) if t.created_at else None,
+            })
 
         active = [l for l in loans if l.status == "active"]
         total_exposure = sum(l.loan_amnt for l in active)

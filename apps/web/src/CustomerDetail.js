@@ -42,6 +42,20 @@ const styles = `
   .cd-ticket { padding: 10px 0; border-bottom: 1px solid #f4f6fa; display: flex; justify-content: space-between; align-items: center; }
   .cd-ticket:last-child { border-bottom: none; }
   .cd-ticket-subj { font-size: 13px; color: #1a1a2e; font-weight: 500; }
+  .cd-ticket-row { padding: 12px 0; border-bottom: 1px solid #f4f6fa; }
+  .cd-ticket-row:last-child { border-bottom: none; }
+  .cd-ticket-head { display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
+  .cd-thread { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .cd-bubble { max-width: 80%; padding: 9px 13px; border-radius: 12px; font-size: 13px; line-height: 1.45; }
+  .cd-bubble-borrower { align-self: flex-start; background: #f0f2f7; color: #1a1a2e; border-bottom-left-radius: 4px; }
+  .cd-bubble-analyst { align-self: flex-end; background: #1a7a3c; color: #fff; border-bottom-right-radius: 4px; }
+  .cd-bubble-meta { font-size: 10px; opacity: 0.6; margin-top: 3px; }
+  .cd-reply { margin-top: 12px; }
+  .cd-reply textarea { width: 100%; box-sizing: border-box; border: 1px solid #e0e4ec; border-radius: 9px; padding: 10px 12px; font-size: 13px; font-family: inherit; resize: vertical; min-height: 60px; }
+  .cd-reply-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .cd-reply-btn { padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; border: none; }
+  .cd-reply-resolve { background: #1a7a3c; color: #fff; }
+  .cd-reply-open { background: #fff; color: #1a1a2e; border: 1px solid #e0e4ec; }
   .cd-ai { background: linear-gradient(135deg, #6a5af9, #7048e8); color: #fff; border-radius: 14px; padding: 22px 24px; margin-bottom: 16px; }
   .cd-ai-title { font-size: 14px; font-weight: 700; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
   .cd-ai-body { font-size: 14px; line-height: 1.7; white-space: pre-wrap; }
@@ -65,6 +79,9 @@ export default function CustomerDetail() {
   const [loading, setLoading] = useState(true);
   const [aiText, setAiText] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
+  const [expandedTicket, setExpandedTicket] = useState(null);
+  const [replyText, setReplyText] = useState("");
+  const [replying, setReplying] = useState(false);
 
   useEffect(() => {
     const load = async () => {
@@ -95,6 +112,31 @@ export default function CustomerDetail() {
       setAiText("Failed to generate analysis. Please try again.");
     }
     setAiLoading(false);
+  };
+
+  const submitReply = async (ticketId, newStatus) => {
+    if (replyText.trim().length < 10) {
+      alert("Reply must be at least 10 characters.");
+      return;
+    }
+    setReplying(true);
+    const token = localStorage.getItem("token");
+    try {
+      await axios.post(`${API}/support/respond/${ticketId}`,
+        { response: replyText, status: newStatus },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      // Reload customer data to refresh the thread
+      const { data: fresh } = await axios.get(`${API}/analyst/customer/${customerId}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setData(fresh);
+      setReplyText("");
+      setExpandedTicket(null);
+    } catch (e) {
+      alert("Failed to send reply.");
+    }
+    setReplying(false);
   };
 
   if (loading) return <AppShell title="Customer"><style>{styles}</style><div className="cd-loading">Loading customer…</div></AppShell>;
@@ -128,8 +170,8 @@ export default function CustomerDetail() {
       borderWidth: 0,
     }]
   };
-  const barOpts = { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } };
-  const donutOpts = { responsive: true, plugins: { legend: { position: "bottom", labels: { font: { size: 11 }, padding: 12 } } } };
+  const barOpts = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } };
+  const donutOpts = { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom", labels: { font: { size: 11 }, padding: 12 } } } };
 
   return (
     <AppShell title="Customer Profile">
@@ -187,11 +229,11 @@ export default function CustomerDetail() {
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
         <div className="cd-section" style={{ marginBottom: 0 }}>
           <div className="cd-section-title">⚠ Risk Distribution</div>
-          <Bar data={riskChart} options={barOpts} />
+          <div style={{ height: 240 }}><Bar data={riskChart} options={barOpts} /></div>
         </div>
         <div className="cd-section" style={{ marginBottom: 0 }}>
           <div className="cd-section-title">📊 Exposure by Loan Type</div>
-          {purposeKeys.length ? <Doughnut data={purposeChart} options={donutOpts} /> :
+          {purposeKeys.length ? <div style={{ height: 240 }}><Doughnut data={purposeChart} options={donutOpts} /></div> :
             <div style={{color:"#8892a4",fontSize:13,padding:20}}>No loans</div>}
         </div>
       </div>
@@ -217,9 +259,43 @@ export default function CustomerDetail() {
         {tickets.length === 0 ? (
           <div style={{color: "#8892a4", fontSize: 13}}>No support tickets.</div>
         ) : tickets.map(t => (
-          <div key={t.id} className="cd-ticket">
-            <div className="cd-ticket-subj">{t.subject}</div>
-            <span className={`risk-pill risk-MEDIUM`}>{t.status}</span>
+          <div key={t.id} className="cd-ticket-row">
+            <div className="cd-ticket-head" onClick={() => setExpandedTicket(expandedTicket === t.id ? null : t.id)}>
+              <div className="cd-ticket-subj">{t.subject}</div>
+              <span className={`risk-pill risk-MEDIUM`}>{t.status} {expandedTicket === t.id ? "▴" : "▾"}</span>
+            </div>
+            {expandedTicket === t.id && (
+              <>
+                <div className="cd-thread">
+                  {(t.thread || []).map(m => (
+                    <div key={m.id} className={`cd-bubble ${m.sender_role === "analyst" ? "cd-bubble-analyst" : "cd-bubble-borrower"}`}>
+                      <div>{m.message}</div>
+                      <div className="cd-bubble-meta">
+                        {m.sender_role === "analyst" ? "You" : "Customer"}
+                        {m.created_at ? " · " + new Date(m.created_at).toLocaleDateString("en-IN", {day:"2-digit",month:"short"}) : ""}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {t.status !== "closed" && (
+                  <div className="cd-reply">
+                    <textarea
+                      placeholder="Type your reply to the customer…"
+                      value={replyText}
+                      onChange={e => setReplyText(e.target.value)}
+                    />
+                    <div className="cd-reply-actions">
+                      <button className="cd-reply-btn cd-reply-resolve" disabled={replying} onClick={() => submitReply(t.id, "resolved")}>
+                        {replying ? "Sending…" : "Send & Resolve"}
+                      </button>
+                      <button className="cd-reply-btn cd-reply-open" disabled={replying} onClick={() => submitReply(t.id, "in_progress")}>
+                        Send & Keep Open
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         ))}
       </div>
