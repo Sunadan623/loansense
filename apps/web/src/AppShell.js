@@ -73,6 +73,7 @@ const BORROWER_NAV = [
 
 const ANALYST_NAV = [
   { label: "Dashboard", icon: "📊", path: "/dashboard" },
+  { label: "Analytics", icon: "📈", path: "/analytics" },
 ];
 
 export default function AppShell({ children, title }) {

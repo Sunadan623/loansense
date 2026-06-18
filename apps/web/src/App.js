@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
 import NotificationBell from "./NotificationBell";
+import AppShell from "./AppShell";
 import AnalystCharts from "./AnalystCharts";
 const RISK = {
   HIGH:   { bg: "#fff0f0", text: "#c0392b", bar: "#e74c3c", dot: "#e74c3c", avatarBg: "#fde8e8", avatarText: "#c0392b" },
@@ -412,28 +413,8 @@ export default function App() {
   const purposeIcons = {personal:"👤", home:"🏠", car:"🚗", education:"🎓", business:"💼", medical:"🏥"};
 
   return (
-    <>
+    <AppShell title="Dashboard">
       <style>{styles}</style>
-      <div className="app">
-      <div className="header">
-          <div className="logo">
-            <div className="logo-icon">
-              <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-            </div>
-            <div>
-              <div className="logo-title">LoanSense</div>
-              <div className="logo-sub">AI-powered default prediction · India NBFC</div>
-            </div>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-            <NotificationBell />
-            <button onClick={handleLogout} style={{
-              background: "none", border: "1px solid #e0e4ec", padding: "7px 14px",
-              borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer",
-              color: "#5a6378", fontFamily: "inherit"
-            }}>Sign out</button>
-          </div>
-        </div>
 
         <div className="stats-row">
           <div className="stat-card">
@@ -1243,8 +1224,7 @@ export default function App() {
             </div>
           </div>
         )}
-      </div>
-    </>
+    </AppShell>
   );
 }
 function Stat({ label, value }) {

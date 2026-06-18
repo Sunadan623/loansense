@@ -1151,6 +1151,83 @@ def analyst_dashboard_stats(current_user: dict = Depends(get_current_user)):
         session.close()
         return {"error": str(e)}
 
+@app.get("/analyst/event-analytics")
+def analyst_event_analytics(current_user: dict = Depends(get_current_user)):
+    """Behavioral analytics computed from the events table. Analyst-only."""
+    if current_user.get("role") != "analyst":
+        return {"error": "Not authorized"}
+    session = Session()
+    try:
+        from collections import defaultdict
+        from datetime import timedelta
+
+        all_events = session.query(Event).all()
+
+        # 1. Event volume by type
+        by_type = defaultdict(int)
+        for e in all_events:
+            by_type[e.event_type] += 1
+
+        # 2. Activity over last 14 days (events per day)
+        today = datetime.utcnow().date()
+        daily = {}
+        for i in range(13, -1, -1):
+            d = today - timedelta(days=i)
+            daily[d.strftime("%d %b")] = 0
+        for e in all_events:
+            if e.created_at:
+                key = e.created_at.date().strftime("%d %b")
+                if key in daily:
+                    daily[key] += 1
+
+        # 3. Conversion funnel
+        funnel = {
+            "affordability_checks": by_type.get("affordability_check", 0),
+            "applications": by_type.get("loan_application_submitted", 0),
+            "payments": by_type.get("payment_succeeded", 0),
+        }
+
+        # 4. Distress: deferral requests over last 14 days
+        deferral_daily = {}
+        for i in range(13, -1, -1):
+            d = today - timedelta(days=i)
+            deferral_daily[d.strftime("%d %b")] = 0
+        for e in all_events:
+            if e.event_type == "deferral_requested" and e.created_at:
+                key = e.created_at.date().strftime("%d %b")
+                if key in deferral_daily:
+                    deferral_daily[key] += 1
+
+        # 5. Recent activity stream (latest 20)
+        recent = session.query(Event).order_by(Event.created_at.desc()).limit(20).all()
+        # Resolve user names
+        uids = list({r.user_id for r in recent})
+        users = session.query(User).filter(User.id.in_(uids)).all() if uids else []
+        name_by_id = {u.id: u.name for u in users}
+        recent_stream = [{
+            "id": r.id,
+            "user_id": r.user_id,
+            "user_name": name_by_id.get(r.user_id, f"User {r.user_id}"),
+            "event_type": r.event_type,
+            "event_category": r.event_category,
+            "loan_id": r.loan_id,
+            "metadata": r.event_metadata,
+            "created_at": str(r.created_at),
+        } for r in recent]
+
+        session.close()
+        return {
+            "event_volume": [{"type": k, "count": v} for k, v in sorted(by_type.items(), key=lambda x: -x[1])],
+            "daily_activity": [{"day": k, "count": v} for k, v in daily.items()],
+            "funnel": funnel,
+            "deferral_trend": [{"day": k, "count": v} for k, v in deferral_daily.items()],
+            "recent_activity": recent_stream,
+            "total_events": len(all_events),
+        }
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
 @app.get("/approved-applications")
 def get_approved_applications(current_user: dict = Depends(get_current_user)):
     if current_user.get("role") != "analyst":
