@@ -696,6 +696,7 @@ export default function App() {
           </div>
         )}
 
+{false && (
 <div className="table-card">
           <div className="table-header" style={{flexDirection: "column", alignItems: "stretch", gap: 14}}>
             <div style={{display: "flex", justifyContent: "space-between", alignItems: "center"}}>
@@ -831,6 +832,7 @@ export default function App() {
             </table>
           )}
         </div>
+)}
         {pendingDeferrals.length > 0 && (
           <div className="table-card" style={{marginBottom: 20}}>
             <div className="table-header">
@@ -881,7 +883,7 @@ export default function App() {
           </div>
         )}
 
-        {tickets.filter(t => t.status !== "closed").length > 0 && (
+        {false && (
           <div className="table-card" style={{marginBottom: 20}}>
             <div className="table-header">
               <span className="table-title">🎫 Support Tickets</span>
