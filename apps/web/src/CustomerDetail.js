@@ -1,9 +1,21 @@
 import { useState, useEffect } from "react";
 import axios from "axios";
 import { useParams, useNavigate } from "react-router-dom";
+import { Doughnut, Bar } from "react-chartjs-2";
+import {
+  Chart as ChartJS, CategoryScale, LinearScale, BarElement, ArcElement,
+  Title, Tooltip, Legend
+} from "chart.js";
 import AppShell from "./AppShell";
 
+ChartJS.register(CategoryScale, LinearScale, BarElement, ArcElement, Title, Tooltip, Legend);
+
 const API = process.env.REACT_APP_API_URL || "http://127.0.0.1:8000";
+
+const PURPOSE_COLORS = {
+  personal: "#4a90e2", home: "#7048e8", car: "#e74c3c",
+  education: "#f39c12", business: "#16a085", medical: "#e91e63", gold: "#daa520"
+};
 
 const styles = `
   .cd-back { background: none; border: none; color: #5a6378; font-size: 13px; font-weight: 500; cursor: pointer; padding: 0; margin-bottom: 18px; font-family: inherit; }
@@ -91,6 +103,34 @@ export default function CustomerDetail() {
   const { customer, summary, loans, tickets } = data;
   const initials = (customer.name || "U").split(" ").map(n => n[0]).join("").slice(0,2).toUpperCase();
 
+  // Risk distribution for THIS customer's loans
+  const riskCounts = { LOW: 0, MEDIUM: 0, HIGH: 0 };
+  loans.forEach(l => { if (riskCounts[l.risk_level] !== undefined) riskCounts[l.risk_level]++; });
+  const riskChart = {
+    labels: ["Low", "Medium", "High"],
+    datasets: [{
+      label: "Loans",
+      data: [riskCounts.LOW, riskCounts.MEDIUM, riskCounts.HIGH],
+      backgroundColor: ["#1a7a3c", "#daa520", "#c0392b"],
+      borderRadius: 6,
+    }]
+  };
+
+  // Exposure by loan type for THIS customer
+  const byPurpose = {};
+  loans.forEach(l => { byPurpose[l.purpose] = (byPurpose[l.purpose] || 0) + l.loan_amnt; });
+  const purposeKeys = Object.keys(byPurpose);
+  const purposeChart = {
+    labels: purposeKeys.map(p => p.charAt(0).toUpperCase() + p.slice(1)),
+    datasets: [{
+      data: purposeKeys.map(p => byPurpose[p]),
+      backgroundColor: purposeKeys.map(p => PURPOSE_COLORS[p] || "#8892a4"),
+      borderWidth: 0,
+    }]
+  };
+  const barOpts = { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } };
+  const donutOpts = { responsive: true, plugins: { legend: { position: "bottom", labels: { font: { size: 11 }, padding: 12 } } } };
+
   return (
     <AppShell title="Customer Profile">
       <style>{styles}</style>
@@ -142,6 +182,18 @@ export default function CustomerDetail() {
             </button>
           </>
         )}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
+        <div className="cd-section" style={{ marginBottom: 0 }}>
+          <div className="cd-section-title">⚠ Risk Distribution</div>
+          <Bar data={riskChart} options={barOpts} />
+        </div>
+        <div className="cd-section" style={{ marginBottom: 0 }}>
+          <div className="cd-section-title">📊 Exposure by Loan Type</div>
+          {purposeKeys.length ? <Doughnut data={purposeChart} options={donutOpts} /> :
+            <div style={{color:"#8892a4",fontSize:13,padding:20}}>No loans</div>}
+        </div>
       </div>
 
       <div className="cd-section">
