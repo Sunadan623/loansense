@@ -1151,6 +1151,215 @@ def analyst_dashboard_stats(current_user: dict = Depends(get_current_user)):
         session.close()
         return {"error": str(e)}
 
+@app.get("/analyst/customers")
+def analyst_list_customers(current_user: dict = Depends(get_current_user)):
+    """List all borrowers with summary stats. Analyst-only."""
+    if current_user.get("role") != "analyst":
+        return {"error": "Not authorized"}
+    session = Session()
+    try:
+        from collections import defaultdict
+        borrowers = session.query(User).filter(User.role == "borrower").all()
+        all_loans = session.query(Loan).all()
+
+        loans_by_user = defaultdict(list)
+        for l in all_loans:
+            loans_by_user[l.user_id].append(l)
+
+        RISK_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+        result = []
+        for u in borrowers:
+            uloans = loans_by_user.get(u.id, [])
+            active = [l for l in uloans if l.status == "active"]
+            total_exposure = sum(l.loan_amnt for l in active)
+            # Highest risk among active loans
+            top_risk = "LOW"
+            for l in active:
+                lvl = l.risk_level if l.risk_level in RISK_ORDER else "MEDIUM"
+                if RISK_ORDER[lvl] > RISK_ORDER[top_risk]:
+                    top_risk = lvl
+            avg_risk = round(sum(l.risk_score or 0 for l in active) / len(active), 3) if active else 0
+            result.append({
+                "id": u.id,
+                "name": u.name,
+                "email": u.email,
+                "employment_type": u.employment_type,
+                "member_since": str(u.created_at) if u.created_at else None,
+                "total_loans": len(uloans),
+                "active_loans": len(active),
+                "total_exposure": round(total_exposure, 2),
+                "top_risk": top_risk if active else "—",
+                "avg_risk_score": avg_risk,
+            })
+
+        # Sort: highest exposure first
+        result.sort(key=lambda x: -x["total_exposure"])
+        session.close()
+        return {"customers": result, "count": len(result)}
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+    
+@app.get("/analyst/customer/{customer_id}")
+def analyst_customer_detail(customer_id: int, current_user: dict = Depends(get_current_user)):
+    """Full profile of one customer: info, loans, payments, tickets. Analyst-only."""
+    if current_user.get("role") != "analyst":
+        return {"error": "Not authorized"}
+    session = Session()
+    try:
+        u = session.query(User).filter(User.id == customer_id, User.role == "borrower").first()
+        if not u:
+            session.close()
+            return {"error": "Customer not found"}
+
+        # Age from DOB
+        age = None
+        if u.date_of_birth:
+            try:
+                dob = datetime.strptime(u.date_of_birth, "%Y-%m-%d")
+                age = (datetime.now() - dob).days // 365
+            except Exception:
+                pass
+
+        loans = session.query(Loan).filter(Loan.user_id == customer_id).all()
+        loans_out = [{
+            "id": l.id,
+            "purpose": l.purpose,
+            "loan_amnt": l.loan_amnt,
+            "term": l.term,
+            "int_rate": l.int_rate,
+            "installment": l.installment,
+            "status": l.status,
+            "risk_level": l.risk_level,
+            "risk_score": round(l.risk_score, 3) if l.risk_score else 0,
+            "cibil_score": l.cibil_score,
+            "carryover_balance": l.carryover_balance or 0,
+            "created_at": str(l.created_at) if l.created_at else None,
+        } for l in loans]
+
+        # Payment behavior from payments table
+        payments = session.query(Payment).filter(Payment.user_id == customer_id).all()
+        paid = [p for p in payments if p.status == "paid"]
+        partial_count = sum(1 for p in paid if p.payment_type == "partial")
+        total_paid = sum(p.amount for p in paid)
+
+        # Support tickets
+        tickets = session.query(SupportTicket).filter(SupportTicket.user_id == customer_id).all()
+        tickets_out = [{
+            "id": t.id,
+            "subject": t.subject,
+            "status": t.status,
+            "created_at": str(t.created_at) if t.created_at else None,
+        } for t in tickets]
+
+        active = [l for l in loans if l.status == "active"]
+        total_exposure = sum(l.loan_amnt for l in active)
+
+        session.close()
+        return {
+            "customer": {
+                "id": u.id,
+                "name": u.name,
+                "email": u.email,
+                "gender": u.gender,
+                "age": age,
+                "pan_number": u.pan_number,
+                "employment_type": u.employment_type,
+                "member_since": str(u.created_at) if u.created_at else None,
+            },
+            "summary": {
+                "total_loans": len(loans),
+                "active_loans": len(active),
+                "total_exposure": round(total_exposure, 2),
+                "total_paid": round(total_paid, 2),
+                "partial_payments": partial_count,
+                "total_payments": len(paid),
+            },
+            "loans": loans_out,
+            "tickets": tickets_out,
+        }
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
+@app.get("/analyst/customer/{customer_id}/ai-analysis")
+async def analyst_customer_ai_analysis(customer_id: int, current_user: dict = Depends(get_current_user)):
+    """AI-generated risk assessment for one customer, using their real data."""
+    if current_user.get("role") != "analyst":
+        return {"error": "Not authorized"}
+    if not OPENROUTER_API_KEY:
+        return {"error": "OpenRouter API key not configured"}
+
+    session = Session()
+    try:
+        u = session.query(User).filter(User.id == customer_id, User.role == "borrower").first()
+        if not u:
+            session.close()
+            return {"error": "Customer not found"}
+
+        loans = session.query(Loan).filter(Loan.user_id == customer_id).all()
+        payments = session.query(Payment).filter(Payment.user_id == customer_id).all()
+        paid = [p for p in payments if p.status == "paid"]
+        partial_count = sum(1 for p in paid if p.payment_type == "partial")
+
+        active = [l for l in loans if l.status == "active"]
+        total_exposure = sum(l.loan_amnt for l in active)
+        total_carryover = sum((l.carryover_balance or 0) for l in active)
+        avg_risk = (sum(l.risk_score or 0 for l in active) / len(active)) if active else 0
+
+        # Build a compact loan summary for the prompt
+        loan_lines = []
+        for l in loans:
+            co = f", carryover ₹{l.carryover_balance:,.0f}" if (l.carryover_balance or 0) > 0 else ""
+            loan_lines.append(f"- {l.purpose} loan #{l.id}: ₹{l.loan_amnt:,.0f}, {l.risk_level} risk, EMI ₹{l.installment:,.0f}{co}")
+        loans_text = "\n".join(loan_lines)
+
+        name = u.name
+        session.close()
+
+        prompt = f"""You are a senior credit risk analyst at an Indian NBFC. Write a concise risk assessment of this customer in 3 short paragraphs.
+
+Customer: {name}
+Active loans: {len(active)} (of {len(loans)} total)
+Total exposure: ₹{total_exposure:,.0f}
+Average risk score: {avg_risk:.0%}
+Total carryover (unpaid backlog): ₹{total_carryover:,.0f}
+Payment behaviour: {partial_count} partial payments out of {len(paid)} total payments
+
+Loan portfolio:
+{loans_text}
+
+Write:
+1. An overall risk verdict (1-2 sentences).
+2. Key observations about their payment behaviour and exposure concentration.
+3. Two specific recommended actions for the analyst.
+
+Keep it under 180 words, professional, plain prose. No markdown headers, no bullet symbols."""
+
+        async with httpx.AsyncClient(timeout=40.0) as client:
+            response = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "openrouter/free",
+                    "messages": [{"role": "user", "content": prompt}]
+                }
+            )
+            result = response.json()
+            if "choices" not in result:
+                return {"error": "OpenRouter API error", "details": result}
+            content = result["choices"][0]["message"]["content"].strip()
+            return {"customer_id": customer_id, "analysis": content}
+    except Exception as e:
+        try:
+            session.close()
+        except Exception:
+            pass
+        return {"error": str(e)}
+
 @app.get("/analyst/event-analytics")
 def analyst_event_analytics(current_user: dict = Depends(get_current_user)):
     """Behavioral analytics computed from the events table. Analyst-only."""

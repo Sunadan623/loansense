@@ -13,6 +13,8 @@ import Support from "./Support";
 import UpcomingEMIs from "./UpcomingEMIs";
 import Transactions from "./Transactions";
 import EventAnalytics from "./EventAnalytics";
+import Customers from "./Customers";
+import CustomerDetail from "./CustomerDetail";
 const isLoggedIn = () => !!localStorage.getItem("token");
 const getRole = () => {
   try {
@@ -51,6 +53,8 @@ root.render(
       <Route path="/upcoming" element={<ProtectedRoute><UpcomingEMIs /></ProtectedRoute>} />
       <Route path="/transactions" element={<ProtectedRoute><Transactions /></ProtectedRoute>} />
       <Route path="/analytics" element={<ProtectedRoute requireRole="analyst"><EventAnalytics /></ProtectedRoute>} />
+      <Route path="/customers" element={<ProtectedRoute requireRole="analyst"><Customers /></ProtectedRoute>} />
+      <Route path="/customer/:customerId" element={<ProtectedRoute requireRole="analyst"><CustomerDetail /></ProtectedRoute>} />
     </Routes>
   </BrowserRouter>
 );
