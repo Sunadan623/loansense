@@ -74,6 +74,7 @@ const BORROWER_NAV = [
 const ANALYST_NAV = [
   { label: "Dashboard", icon: "📊", path: "/dashboard" },
   { label: "Customers", icon: "👥", path: "/customers" },
+  { label: "Q&A / Tickets", icon: "📨", path: "/tickets" },
   { label: "Analytics", icon: "📈", path: "/analytics" },
 ];
 

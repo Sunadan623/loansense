@@ -2744,6 +2744,7 @@ def all_tickets(current_user: dict = Depends(get_current_user)):
             "thread": thread,
             "borrower_name": u.name if u else "Unknown",
             "borrower_email": u.email if u else "",
+            "user_id": t.user_id,
             "created_at": t.created_at.isoformat() if t.created_at else None,
         })
     session.close()
