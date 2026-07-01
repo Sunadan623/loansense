@@ -76,6 +76,7 @@ const ANALYST_NAV = [
   { label: "Customers", icon: "👥", path: "/customers" },
   { label: "Q&A / Tickets", icon: "📨", path: "/tickets" },
   { label: "Analytics", icon: "📈", path: "/analytics" },
+  { label: "Model Health", icon: "🧠", path: "/model-monitoring" },
 ];
 
 export default function AppShell({ children, title }) {

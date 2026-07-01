@@ -1372,6 +1372,119 @@ Keep it under 180 words, professional, plain prose. No markdown headers, no bull
             pass
         return {"error": str(e)}
 
+@app.get("/analyst/model-monitoring")
+def analyst_model_monitoring(current_user: dict = Depends(get_current_user)):
+    """ML model health metrics: validation performance, prediction distribution, score-vs-behavior. Analyst-only."""
+    if current_user.get("role") != "analyst":
+        return {"error": "Not authorized"}
+    session = Session()
+    try:
+        import numpy as np
+        import json as _json
+        from collections import defaultdict
+
+        result = {}
+
+        # --- 1. Model info from ensemble config ---
+        try:
+            with open(os.path.join(BASE_DIR, "models/ensemble_config.json")) as fcfg:
+                cfg = _json.load(fcfg)
+        except Exception:
+            cfg = {}
+        result["model_info"] = {
+            "type": "Ensemble (XGBoost + LSTM + DeepSurv)",
+            "xgb_auc": cfg.get("xgb_auc"),
+            "lstm_auc": cfg.get("lstm_auc"),
+            "ensemble_auc": cfg.get("ensemble_auc"),
+            "xgb_weight": cfg.get("xgb_weight"),
+            "lstm_weight": cfg.get("lstm_weight"),
+            "feature_count": len(feature_names),
+        }
+
+        # --- 2. Validation metrics from saved test predictions + ground truth ---
+        try:
+            xgb_preds = np.load(os.path.join(BASE_DIR, "models/xgb_preds.npy"))
+            y_test = np.load(os.path.join(BASE_DIR, "models/y_test.npy"))
+            # Align lengths defensively
+            n = min(len(xgb_preds), len(y_test))
+            xgb_preds = xgb_preds[:n].astype(float).ravel()
+            y_test = y_test[:n].astype(int).ravel()
+
+            preds_binary = (xgb_preds >= 0.5).astype(int)
+            tp = int(np.sum((preds_binary == 1) & (y_test == 1)))
+            tn = int(np.sum((preds_binary == 0) & (y_test == 0)))
+            fp = int(np.sum((preds_binary == 1) & (y_test == 0)))
+            fn = int(np.sum((preds_binary == 0) & (y_test == 1)))
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+            accuracy = (tp + tn) / n if n > 0 else 0
+
+            # AUC via sklearn if available
+            try:
+                from sklearn.metrics import roc_auc_score
+                auc = float(roc_auc_score(y_test, xgb_preds))
+            except Exception:
+                auc = cfg.get("xgb_auc", 0)
+
+            result["validation"] = {
+                "test_size": n,
+                "auc": round(auc, 4),
+                "precision": round(precision, 4),
+                "recall": round(recall, 4),
+                "f1": round(f1, 4),
+                "accuracy": round(accuracy, 4),
+                "confusion_matrix": {"tp": tp, "tn": tn, "fp": fp, "fn": fn},
+                "default_rate_test": round(float(np.mean(y_test)), 4),
+            }
+        except Exception as e:
+            result["validation"] = {"error": f"Could not load test predictions: {e}"}
+
+        # --- 3. Prediction distribution across LIVE loans ---
+        loans = session.query(Loan).all()
+        scores = [l.risk_score for l in loans if l.risk_score is not None]
+        buckets = {"0-20%": 0, "20-40%": 0, "40-60%": 0, "60-80%": 0, "80-100%": 0}
+        for s in scores:
+            pct = s * 100
+            if pct < 20: buckets["0-20%"] += 1
+            elif pct < 40: buckets["20-40%"] += 1
+            elif pct < 60: buckets["40-60%"] += 1
+            elif pct < 80: buckets["60-80%"] += 1
+            else: buckets["80-100%"] += 1
+        result["prediction_distribution"] = [{"range": k, "count": v} for k, v in buckets.items()]
+        result["live_stats"] = {
+            "total_predictions": len(scores),
+            "mean_risk": round(sum(scores) / len(scores), 4) if scores else 0,
+        }
+
+        # --- 4. Score vs. actual behavior (validation on real repayment) ---
+        # For each risk band, what fraction of payments were partial? Higher risk should = more partials.
+        payments = session.query(Payment).filter(Payment.status == "paid").all()
+        loan_by_id = {l.id: l for l in loans}
+        band_stats = defaultdict(lambda: {"partial": 0, "total": 0})
+        for p in payments:
+            loan = loan_by_id.get(p.loan_id)
+            if not loan or loan.risk_score is None:
+                continue
+            band = "HIGH" if loan.risk_score >= 0.6 else "MEDIUM" if loan.risk_score >= 0.3 else "LOW"
+            band_stats[band]["total"] += 1
+            if p.payment_type == "partial":
+                band_stats[band]["partial"] += 1
+        result["score_vs_behavior"] = [
+            {
+                "band": b,
+                "partial_rate": round(band_stats[b]["partial"] / band_stats[b]["total"], 3) if band_stats[b]["total"] > 0 else 0,
+                "payments": band_stats[b]["total"],
+            }
+            for b in ["LOW", "MEDIUM", "HIGH"]
+        ]
+
+        session.close()
+        return result
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
 @app.get("/analyst/portfolio-intelligence")
 def analyst_portfolio_intelligence(current_user: dict = Depends(get_current_user)):
     """Real portfolio analytics from loans/payments/ledger. Analyst-only."""

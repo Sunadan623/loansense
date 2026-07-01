@@ -16,6 +16,7 @@ import EventAnalytics from "./EventAnalytics";
 import Customers from "./Customers";
 import CustomerDetail from "./CustomerDetail";
 import Tickets from "./Tickets";
+import ModelMonitoring from "./ModelMonitoring";
 const isLoggedIn = () => !!localStorage.getItem("token");
 const getRole = () => {
   try {
@@ -57,6 +58,7 @@ root.render(
       <Route path="/customers" element={<ProtectedRoute requireRole="analyst"><Customers /></ProtectedRoute>} />
       <Route path="/customer/:customerId" element={<ProtectedRoute requireRole="analyst"><CustomerDetail /></ProtectedRoute>} />
       <Route path="/tickets" element={<ProtectedRoute requireRole="analyst"><Tickets /></ProtectedRoute>} />
+      <Route path="/model-monitoring" element={<ProtectedRoute requireRole="analyst"><ModelMonitoring /></ProtectedRoute>} />
     </Routes>
   </BrowserRouter>
 );
