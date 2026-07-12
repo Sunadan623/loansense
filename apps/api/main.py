@@ -1884,6 +1884,12 @@ def verify_payment(data: dict, current_user: dict = Depends(get_current_user)):
                 if loan.carryover_balance == 0:
                     loan.emi_adjustment = 0
 
+        # Foreclosure: close the loan and clear any backlog
+        if payment.payment_type == "foreclosure":
+            loan.status = "closed"
+            loan.carryover_balance = 0
+            loan.emi_adjustment = 0
+
         balance_after = loan.carryover_balance or 0
 
         # === STEP 7: Write the immutable ledger entry ===
@@ -1910,6 +1916,14 @@ def verify_payment(data: dict, current_user: dict = Depends(get_current_user)):
             reference=razorpay_payment_id,
             description=f"{payment.payment_type or 'full'} EMI payment for {loan.purpose} loan #{loan.id}"
         )
+        # Capture plain values BEFORE commit (commit expires ORM objects)
+        _uname = user.name if user else ''
+        _uemail = user.email if user else ''
+        _uid = user.id if user else None
+        _lpurpose = loan.purpose
+        _lid = loan.id
+        _pamount = payment.amount
+        _is_foreclosure = (payment.payment_type == 'foreclosure')
         session.add(ledger)
         session.flush()
         ledger_id_value = ledger.id
@@ -1934,21 +1948,24 @@ def verify_payment(data: dict, current_user: dict = Depends(get_current_user)):
         )
 
         # === STEP 9: Side-effects (email, notifications) — these are outside the DB transaction ===
-        if user and loan:
+        if _uid and _lid:
             try:
-                email = payment_success_email(user.name, payment.amount, loan.purpose)
-                send_email(user.email, email["subject"], email["html"])
+                email = payment_success_email(_uname, _pamount, _lpurpose)
+                send_email(_uemail, email["subject"], email["html"])
             except Exception as e:
                 print(f"Email failed: {e}")
 
             try:
-                create_notification(session, user.id, "Payment Received ✓",
-                    f"Your payment of ₹{payment.amount:,.0f} for {loan.purpose} loan was successful.",
-                    "payment", f"/loan/{loan.id}")
+                create_notification(session, _uid,
+                    "Loan Foreclosed ✓" if _is_foreclosure else "Payment Received ✓",
+                    (f"Your {_lpurpose} loan has been fully closed. ₹{_pamount:,.0f} received."
+                     if _is_foreclosure else
+                     f"Your payment of ₹{_pamount:,.0f} for {_lpurpose} loan was successful."),
+                    "payment", f"/loan/{_lid}")
                 notify_all_analysts(
                     session,
                     "💰 EMI Payment Received",
-                    f"{user.name} paid ₹{payment.amount:,.0f} for their {loan.purpose} loan",
+                    f"{_uname} paid ₹{_pamount:,.0f} for their {_lpurpose} loan",
                     "payment",
                     "/dashboard"
                 )
@@ -1968,6 +1985,7 @@ def verify_payment(data: dict, current_user: dict = Depends(get_current_user)):
         session.close()
         return {"error": "Invalid signature — payment verification failed"}
     except Exception as e:
+        import traceback; traceback.print_exc()
         session.rollback()
         session.close()
         return {"error": str(e)}
@@ -2272,6 +2290,139 @@ def get_my_profile(current_user: dict = Depends(get_current_user)):
     session.close()
     return result
 # ============== SMART EMI / PARTIAL PAYMENT ENDPOINTS ==============
+
+@app.get("/foreclosure-quote/{loan_id}")
+def foreclosure_quote(loan_id: int, current_user: dict = Depends(get_current_user)):
+    """Quote to foreclose (fully close) a loan early: outstanding + charge, and interest saved."""
+    session = Session()
+    try:
+        loan = session.query(Loan).filter(
+            Loan.id == loan_id,
+            Loan.user_id == current_user["user_id"]
+        ).first()
+        if not loan:
+            session.close()
+            return {"error": "Loan not found"}
+        if loan.status != "active":
+            session.close()
+            return {"error": f"Loan is {loan.status}, cannot foreclose"}
+
+        paid_payments = session.query(Payment).filter(
+            Payment.loan_id == loan_id,
+            Payment.status == "paid"
+        ).all()
+        total_paid = sum(p.amount for p in paid_payments)
+        paid_count = len(paid_payments)
+
+        outstanding = max(loan.loan_amnt - total_paid, 0)
+        # Include any accumulated carryover backlog
+        outstanding += (loan.carryover_balance or 0)
+
+        # Foreclosure charge: 2% of outstanding (typical NBFC range 0-4%)
+        FORECLOSURE_RATE = 0.02
+        foreclosure_charge = round(outstanding * FORECLOSURE_RATE, 2)
+        total_payable = round(outstanding + foreclosure_charge, 2)
+
+        # Interest saved: what they'd pay in remaining EMIs vs. outstanding principal
+        remaining_emis = max(loan.term - paid_count, 0)
+        remaining_emi_total = round(remaining_emis * (loan.installment + (loan.emi_adjustment or 0)), 2)
+        interest_saved = round(max(remaining_emi_total - total_payable, 0), 2)
+
+        session.close()
+        return {
+            "loan_id": loan_id,
+            "purpose": loan.purpose,
+            "outstanding": round(outstanding, 2),
+            "foreclosure_charge": foreclosure_charge,
+            "foreclosure_rate_pct": FORECLOSURE_RATE * 100,
+            "total_payable": total_payable,
+            "remaining_emis": remaining_emis,
+            "remaining_emi_total": remaining_emi_total,
+            "interest_saved": interest_saved,
+            "paid_count": paid_count,
+            "total_term": loan.term,
+        }
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
+
+@app.post("/create-foreclosure-order/{loan_id}")
+def create_foreclosure_order(loan_id: int, data: dict = None, current_user: dict = Depends(get_current_user)):
+    """Create a Razorpay order to foreclose (close) a loan early."""
+    if not razorpay_client:
+        return {"error": "Razorpay not configured"}
+    session = Session()
+    try:
+        loan = session.query(Loan).filter(
+            Loan.id == loan_id,
+            Loan.user_id == current_user["user_id"]
+        ).first()
+        if not loan:
+            session.close()
+            return {"error": "Loan not found"}
+        if loan.status != "active":
+            session.close()
+            return {"error": "Loan is not active"}
+
+        paid_payments = session.query(Payment).filter(
+            Payment.loan_id == loan_id,
+            Payment.status == "paid"
+        ).all()
+        total_paid = sum(p.amount for p in paid_payments)
+        outstanding = max(loan.loan_amnt - total_paid, 0) + (loan.carryover_balance or 0)
+        foreclosure_charge = round(outstanding * 0.02, 2)
+        total_payable = round(outstanding + foreclosure_charge, 2)
+
+        if total_payable <= 0:
+            session.close()
+            return {"error": "Nothing left to pay — loan is already settled"}
+
+        amount_paise = int(total_payable * 100)
+        order_data = {
+            "amount": amount_paise,
+            "currency": "INR",
+            "receipt": f"foreclose_{loan_id}_{int(datetime.utcnow().timestamp())}",
+            "notes": {
+                "loan_id": str(loan_id),
+                "user_id": str(current_user["user_id"]),
+                "purpose": loan.purpose,
+                "payment_type": "foreclosure",
+            }
+        }
+        order = razorpay_client.order.create(data=order_data)
+        payment = Payment(
+            loan_id=loan_id,
+            user_id=current_user["user_id"],
+            amount=total_payable,
+            payment_type="foreclosure",
+            expected_emi=loan.installment,
+            late_fee=foreclosure_charge,  # store the charge in late_fee slot for ledger
+            days_late=0,
+            razorpay_order_id=order["id"],
+            status="created"
+        )
+        session.add(payment)
+        session.commit()
+        payment_id = payment.id
+        loan_purpose_value = loan.purpose
+        session.close()
+        return {
+            "success": True,
+            "order_id": order["id"],
+            "amount": amount_paise,
+            "currency": "INR",
+            "key_id": RAZORPAY_KEY_ID,
+            "payment_id": payment_id,
+            "loan_purpose": loan_purpose_value,
+            "emi_amount": total_payable,
+            "payment_type": "foreclosure",
+            "foreclosure_charge": foreclosure_charge,
+            "outstanding": round(outstanding, 2),
+        }
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
 
 @app.get("/emi-status/{loan_id}")
 def get_emi_status(loan_id: int, current_user: dict = Depends(get_current_user)):

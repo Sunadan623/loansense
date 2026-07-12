@@ -76,6 +76,9 @@ export default function LoanDetails() {
   const [dateChangeForm, setDateChangeForm] = useState({ requested_due_day: 15, reason: "" });
   const [dateChangeError, setDateChangeError] = useState("");
   const [dateChangeSubmitting, setDateChangeSubmitting] = useState(false);
+  const [foreclosureQuote, setForeclosureQuote] = useState(null);
+  const [showForeclosureModal, setShowForeclosureModal] = useState(false);
+  const [foreclosing, setForeclosing] = useState(false);
 
   useEffect(() => {
     const fetch = async () => {
@@ -133,6 +136,66 @@ export default function LoanDetails() {
       setDateChangeError("Could not submit request");
     }
     setDateChangeSubmitting(false);
+  };
+
+  const API_BASE = process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000';
+
+  const openForeclosure = async () => {
+    const token = localStorage.getItem("token");
+    try {
+      const { data } = await axios.get(`${API_BASE}/foreclosure-quote/${loanId}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (data.error) { alert(data.error); return; }
+      setForeclosureQuote(data);
+      setShowForeclosureModal(true);
+    } catch (e) {
+      alert("Could not load foreclosure quote.");
+    }
+  };
+
+  const confirmForeclosure = async () => {
+    setForeclosing(true);
+    const token = localStorage.getItem("token");
+    try {
+      const { data: order } = await axios.post(`${API_BASE}/create-foreclosure-order/${loanId}`, {}, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (order.error) { alert(order.error); setForeclosing(false); return; }
+      const options = {
+        key: order.key_id,
+        amount: order.amount,
+        currency: order.currency,
+        name: "LoanSense",
+        description: `Foreclosure \u2014 ${order.loan_purpose} loan`,
+        order_id: order.order_id,
+        handler: async (response) => {
+          try {
+            const { data: verify } = await axios.post(`${API_BASE}/verify-payment`, {
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature
+            }, { headers: { Authorization: `Bearer ${token}` } });
+            if (verify && verify.success) {
+              alert("\u2713 Loan foreclosed and closed successfully!");
+              window.location.reload();
+            } else {
+              alert(verify?.error || "Verification failed");
+            }
+          } catch (e) {
+            alert("Payment submitted. Refresh to confirm closure.");
+          }
+          setForeclosing(false);
+        },
+        theme: { color: "#1a1a2e" },
+        modal: { ondismiss: () => setForeclosing(false) }
+      };
+      const rzp = new window.Razorpay(options);
+      rzp.open();
+    } catch (e) {
+      alert("Could not start foreclosure payment.");
+      setForeclosing(false);
+    }
   };
 
   const submitDeferral = async () => {
@@ -288,6 +351,29 @@ export default function LoanDetails() {
               )}
               </div>
     
+              {/* Foreclosure Section */}
+              {loan.status === "active" && (
+                <div className="section-card">
+                  <div className="section-title">🏁 Close This Loan Early</div>
+                  <div style={{fontSize: 13, color: "#5a6378", lineHeight: 1.6, marginBottom: 16}}>
+                    Pay off your entire outstanding balance now and close this loan ahead of schedule. A small foreclosure charge applies, but you save on future interest.
+                  </div>
+                  <button
+                    onClick={openForeclosure}
+                    style={{padding: "11px 22px", background: "#1a1a2e", color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit"}}>
+                    View foreclosure quote
+                  </button>
+                </div>
+              )}
+              {loan.status === "closed" && (
+                <div className="section-card" style={{background: "#f0fdf4", borderColor: "#bbf7d0"}}>
+                  <div className="section-title" style={{color: "#1a7a3c"}}>✅ Loan Closed</div>
+                  <div style={{fontSize: 13, color: "#166534", lineHeight: 1.6}}>
+                    This loan has been fully settled and closed. No further payments are due.
+                  </div>
+                </div>
+              )}
+
               {/* EMI Date Change Section */}
               <div className="section-card">
                 <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: 18}}>
@@ -466,6 +552,47 @@ export default function LoanDetails() {
               <button className="btn-secondary" onClick={() => setShowDeferralModal(false)}>Cancel</button>
               <button className="btn-primary" onClick={submitDeferral} disabled={submitting} style={{flex: 1}}>
                 {submitting ? "Submitting..." : "Submit Request"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showForeclosureModal && foreclosureQuote && (
+        <div className="modal-overlay" onClick={() => setShowForeclosureModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-title">🏁 Foreclose Loan</div>
+            <div style={{fontSize: 13, color: "#5a6378", marginBottom: 18, lineHeight: 1.5}}>
+              Close this loan today by paying the outstanding balance plus a foreclosure charge.
+            </div>
+            <div style={{display: "flex", flexDirection: "column", gap: 10, marginBottom: 20}}>
+              <div style={{display: "flex", justifyContent: "space-between", fontSize: 14}}>
+                <span style={{color: "#5a6378"}}>Outstanding balance</span>
+                <span style={{fontWeight: 600, fontFamily: "DM Mono, monospace"}}>₹{Math.round(foreclosureQuote.outstanding).toLocaleString()}</span>
+              </div>
+              <div style={{display: "flex", justifyContent: "space-between", fontSize: 14}}>
+                <span style={{color: "#5a6378"}}>Foreclosure charge ({foreclosureQuote.foreclosure_rate_pct}%)</span>
+                <span style={{fontWeight: 600, fontFamily: "DM Mono, monospace"}}>₹{Math.round(foreclosureQuote.foreclosure_charge).toLocaleString()}</span>
+              </div>
+              <div style={{display: "flex", justifyContent: "space-between", fontSize: 16, paddingTop: 10, borderTop: "1px solid #f0f2f7"}}>
+                <span style={{fontWeight: 600}}>Total payable now</span>
+                <span style={{fontWeight: 700, fontFamily: "DM Mono, monospace"}}>₹{Math.round(foreclosureQuote.total_payable).toLocaleString()}</span>
+              </div>
+              <div style={{background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 10, padding: "12px 14px", marginTop: 6}}>
+                <div style={{fontSize: 13, color: "#166534", fontWeight: 600}}>
+                  💰 You save ₹{Math.round(foreclosureQuote.interest_saved).toLocaleString()} in future interest
+                </div>
+                <div style={{fontSize: 12, color: "#5a6378", marginTop: 4}}>
+                  vs. paying {foreclosureQuote.remaining_emis} remaining EMIs (₹{Math.round(foreclosureQuote.remaining_emi_total).toLocaleString()} total)
+                </div>
+              </div>
+            </div>
+            <div style={{display: "flex", gap: 10, justifyContent: "flex-end"}}>
+              <button className="btn-secondary" onClick={() => setShowForeclosureModal(false)}>Cancel</button>
+              <button
+                onClick={confirmForeclosure}
+                disabled={foreclosing}
+                style={{padding: "10px 20px", background: "#1a7a3c", color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit"}}>
+                {foreclosing ? "Processing…" : `Pay ₹${Math.round(foreclosureQuote.total_payable).toLocaleString()} & Close`}
               </button>
             </div>
           </div>
