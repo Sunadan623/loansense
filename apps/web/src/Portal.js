@@ -275,15 +275,20 @@ export default function Portal() {
                         ✗ Rejected: {l.rejection_reason || "Did not meet criteria"}
                       </div>
                     )}
+                    <button className="btn-secondary" onClick={() => navigate(`/loan/${l.id}`)}>View details</button>
                     {l.status === "active" && (
   <>
-    <button className="btn-secondary" onClick={() => navigate(`/loan/${l.id}`)}>View details</button>
     <button className="btn-secondary" onClick={() => navigate(`/loan/${l.id}`)}>Request deferral</button>
     <button className="btn-pay" onClick={() => handlePayEMI(l)} disabled={paying === l.id}>
       {paying === l.id ? "Processing..." : "Pay EMI"}
     </button>
   </>
 )}
+                    {l.status === "closed" && (
+                      <button className="btn-pay" style={{background: "#1a7a3c"}} onClick={() => navigate(`/loan/${l.id}`)}>
+                        📄 Get NOC
+                      </button>
+                    )}
                     {l.status === "paid" && (
                       <div className="status-msg" style={{ background: "#e0f2fe", color: "#0369a1" }}>
                         ✓ Loan fully paid

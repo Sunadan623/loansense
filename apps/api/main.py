@@ -2938,6 +2938,155 @@ def amortization_pdf(loan_id: int, current_user: dict = Depends(get_current_user
     return StreamingResponse(buf, media_type="application/pdf",
                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
+@app.get("/loan/{loan_id}/closure-certificate")
+def closure_certificate(loan_id: int, current_user: dict = Depends(get_current_user)):
+    """No Objection Certificate (NOC) for a closed loan."""
+    session = Session()
+    try:
+        loan = session.query(Loan).filter(
+            Loan.id == loan_id,
+            Loan.user_id == current_user["user_id"]
+        ).first()
+        if not loan:
+            session.close()
+            return {"error": "Loan not found"}
+        if loan.status != "closed":
+            session.close()
+            return {"error": "Certificate is only available for closed loans"}
+
+        user = session.query(User).filter(User.id == loan.user_id).first()
+
+        # Ledger summary
+        entries = session.query(LedgerEntry).filter(LedgerEntry.loan_id == loan_id).all()
+        total_paid = sum(e.amount for e in entries)
+        total_principal = sum((e.principal_component or 0) for e in entries)
+        total_interest = sum((e.interest_component or 0) for e in entries)
+        total_fees = sum((e.fee_component or 0) for e in entries)
+        payment_count = len(entries)
+        last_entry = max(entries, key=lambda e: e.created_at) if entries else None
+        closure_date = last_entry.created_at if last_entry else datetime.utcnow()
+
+        # Capture plain values before closing session
+        u_name = user.name if user else "Borrower"
+        u_email = user.email if user else ""
+        l_purpose = loan.purpose
+        l_amount = loan.loan_amnt
+        l_term = loan.term
+        l_rate = loan.int_rate
+        l_emi = loan.installment
+        l_disbursed = loan.reviewed_at.strftime("%d %b %Y") if loan.reviewed_at else "—"
+        session.close()
+
+        cert_no = f"LS/NOC/{datetime.utcnow().year}/{loan_id:05d}"
+
+        # Build PDF
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=A4,
+                                leftMargin=20*mm, rightMargin=20*mm,
+                                topMargin=20*mm, bottomMargin=20*mm)
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle("Title", parent=styles["Title"],
+                                      fontSize=22, textColor=colors.HexColor("#1a1a2e"), spaceAfter=2)
+        subtitle_style = ParagraphStyle("Subtitle", parent=styles["Normal"],
+                                         fontSize=10, textColor=colors.HexColor("#8892a4"), spaceAfter=20)
+        cert_title = ParagraphStyle("CertTitle", parent=styles["Heading1"],
+                                     fontSize=15, textColor=colors.HexColor("#1a7a3c"),
+                                     alignment=1, spaceBefore=6, spaceAfter=16)
+        h2_style = ParagraphStyle("H2", parent=styles["Heading2"],
+                                   fontSize=12, textColor=colors.HexColor("#1a1a2e"),
+                                   spaceAfter=8, spaceBefore=14)
+        normal = ParagraphStyle("Body", parent=styles["Normal"], fontSize=10, leading=15)
+        small = ParagraphStyle("Small", parent=styles["Normal"], fontSize=8,
+                                textColor=colors.HexColor("#8892a4"), leading=11)
+
+        el = []
+        el.append(Paragraph("LoanSense", title_style))
+        el.append(Paragraph("AI-powered lending · India NBFC", subtitle_style))
+        el.append(Paragraph("NO OBJECTION CERTIFICATE", cert_title))
+
+        el.append(Paragraph(
+            f"Certificate No: <b>{cert_no}</b> &nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"Issued on: <b>{datetime.utcnow().strftime('%d %b %Y')}</b>", normal))
+        el.append(Spacer(1, 14))
+
+        el.append(Paragraph(
+            f"This is to certify that <b>{u_name}</b> has fully repaid and closed the "
+            f"{l_purpose} loan detailed below. LoanSense confirms that no dues remain outstanding "
+            f"against this loan account, and we have <b>no objection</b> to the release of any "
+            f"associated security or the updating of credit bureau records accordingly.", normal))
+        el.append(Spacer(1, 16))
+
+        el.append(Paragraph("Loan Details", h2_style))
+        detail_data = [
+            ["Borrower", u_name, "Loan ID", f"#{loan_id}"],
+            ["Email", u_email, "Loan Type", l_purpose.title()],
+            ["Sanctioned Amount", f"INR {l_amount:,.0f}", "Interest Rate", f"{l_rate}% p.a."],
+            ["Original Tenure", f"{l_term} months", "Monthly EMI", f"INR {l_emi:,.0f}"],
+            ["Disbursed On", l_disbursed, "Closed On", closure_date.strftime("%d %b %Y")],
+        ]
+        t = Table(detail_data, colWidths=[32*mm, 50*mm, 30*mm, 50*mm])
+        t.setStyle(TableStyle([
+            ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
+            ("FONTSIZE", (0,0), (-1,-1), 9),
+            ("TEXTCOLOR", (0,0), (0,-1), colors.HexColor("#8892a4")),
+            ("TEXTCOLOR", (2,0), (2,-1), colors.HexColor("#8892a4")),
+            ("FONTNAME", (1,0), (1,-1), "Helvetica-Bold"),
+            ("FONTNAME", (3,0), (3,-1), "Helvetica-Bold"),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 7),
+            ("TOPPADDING", (0,0), (-1,-1), 7),
+            ("LINEBELOW", (0,0), (-1,-2), 0.3, colors.HexColor("#f0f2f7")),
+        ]))
+        el.append(t)
+
+        el.append(Paragraph("Settlement Summary", h2_style))
+        pay_data = [
+            ["Total Amount Paid", f"INR {total_paid:,.2f}"],
+            ["Towards Principal", f"INR {total_principal:,.2f}"],
+            ["Towards Interest", f"INR {total_interest:,.2f}"],
+            ["Charges & Fees", f"INR {total_fees:,.2f}"],
+            ["Number of Payments", str(payment_count)],
+            ["Outstanding Balance", "INR 0.00"],
+        ]
+        t2 = Table(pay_data, colWidths=[80*mm, 82*mm])
+        t2.setStyle(TableStyle([
+            ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
+            ("FONTSIZE", (0,0), (-1,-1), 9),
+            ("TEXTCOLOR", (0,0), (0,-1), colors.HexColor("#8892a4")),
+            ("FONTNAME", (1,0), (1,-1), "Helvetica-Bold"),
+            ("TEXTCOLOR", (1,-1), (1,-1), colors.HexColor("#1a7a3c")),
+            ("FONTNAME", (0,-1), (-1,-1), "Helvetica-Bold"),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 7),
+            ("TOPPADDING", (0,0), (-1,-1), 7),
+            ("LINEBELOW", (0,0), (-1,-2), 0.3, colors.HexColor("#f0f2f7")),
+            ("LINEABOVE", (0,-1), (-1,-1), 0.6, colors.HexColor("#1a1a2e")),
+        ]))
+        el.append(t2)
+
+        el.append(Spacer(1, 26))
+        el.append(Paragraph("For LoanSense", normal))
+        el.append(Spacer(1, 22))
+        el.append(Paragraph("_______________________", normal))
+        el.append(Paragraph("Authorised Signatory", small))
+
+        el.append(Spacer(1, 20))
+        el.append(Paragraph(
+            "This is a system-generated certificate and does not require a physical signature. "
+            "For verification, quote the certificate number above.", small))
+
+        doc.build(el)
+        buf.seek(0)
+        return StreamingResponse(
+            buf, media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="NOC_loan_{loan_id}.pdf"'}
+        )
+    except Exception as e:
+        try:
+            session.close()
+        except Exception:
+            pass
+        return {"error": str(e)}
+
+
 # ============== SUPPORT TICKETS ==============
 
 @app.post("/support/create-ticket")

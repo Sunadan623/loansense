@@ -140,6 +140,26 @@ export default function LoanDetails() {
 
   const API_BASE = process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000';
 
+  const downloadNOC = async () => {
+    const token = localStorage.getItem("token");
+    try {
+      const res = await axios.get(`${API_BASE}/loan/${loanId}/closure-certificate`, {
+        headers: { Authorization: `Bearer ${token}` },
+        responseType: "blob"
+      });
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: "application/pdf" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `NOC_loan_${loanId}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      alert("Could not download certificate.");
+    }
+  };
+
   const openForeclosure = async () => {
     const token = localStorage.getItem("token");
     try {
@@ -368,9 +388,16 @@ export default function LoanDetails() {
               {loan.status === "closed" && (
                 <div className="section-card" style={{background: "#f0fdf4", borderColor: "#bbf7d0"}}>
                   <div className="section-title" style={{color: "#1a7a3c"}}>✅ Loan Closed</div>
-                  <div style={{fontSize: 13, color: "#166534", lineHeight: 1.6}}>
+                  <div style={{fontSize: 13, color: "#166534", lineHeight: 1.6, marginBottom: 16}}>
                     This loan has been fully settled and closed. No further payments are due.
+                    Download your No Objection Certificate below — you may need it to release collateral
+                    or update your credit records.
                   </div>
+                  <button
+                    onClick={downloadNOC}
+                    style={{padding: "11px 22px", background: "#1a7a3c", color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit"}}>
+                    📄 Download NOC Certificate
+                  </button>
                 </div>
               )}
 
