@@ -17,3 +17,5 @@ loansense_backup*
 loansense_clean*
 seed_demo_customers.py
 backup_err.log
+NOC_test.pdf
+*.bak
