@@ -646,6 +646,73 @@ def get_my_loans(current_user: dict = Depends(get_current_user)):
     return result
 
 
+@app.get("/my-portfolio")
+def get_my_portfolio(current_user: dict = Depends(get_current_user)):
+    """Borrower portfolio overview: credit standing, totals, loan-type breakdown, risk mix."""
+    session = Session()
+    try:
+        from collections import defaultdict
+        loans = session.query(Loan).filter(Loan.user_id == current_user["user_id"]).all()
+        active = [l for l in loans if l.status == "active"]
+        closed = [l for l in loans if l.status == "closed"]
+        recent = sorted(loans, key=lambda l: l.created_at or datetime.min, reverse=True)
+        current_cibil = recent[0].cibil_score if recent and recent[0].cibil_score else None
+        payments = session.query(Payment).filter(
+            Payment.user_id == current_user["user_id"],
+            Payment.status == "paid"
+        ).all()
+        total_paid = sum(p.amount for p in payments)
+        total_borrowed = sum(l.loan_amnt for l in loans)
+        total_outstanding = sum(max(l.loan_amnt - sum(p.amount for p in payments if p.loan_id == l.id), 0)
+                                for l in active)
+        total_active_exposure = sum(l.loan_amnt for l in active)
+        by_type = defaultdict(lambda: {"count": 0, "amount": 0.0})
+        for l in active:
+            by_type[l.purpose]["count"] += 1
+            by_type[l.purpose]["amount"] += l.loan_amnt
+        type_breakdown = [
+            {"purpose": k, "count": v["count"], "amount": round(v["amount"], 2)}
+            for k, v in sorted(by_type.items(), key=lambda x: -x[1]["amount"])
+        ]
+        risk_dist = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
+        for l in active:
+            lvl = l.risk_level if l.risk_level in risk_dist else "MEDIUM"
+            risk_dist[lvl] += 1
+        avg_risk = round(sum(l.risk_score or 0 for l in active) / len(active), 3) if active else 0
+        headroom = 0
+        if current_cibil:
+            if current_cibil >= 750:
+                capacity = 5000000
+            elif current_cibil >= 700:
+                capacity = 3000000
+            elif current_cibil >= 650:
+                capacity = 1500000
+            else:
+                capacity = 500000
+            headroom = max(capacity - total_active_exposure, 0)
+        progress_pct = round((total_paid / total_borrowed * 100), 1) if total_borrowed > 0 else 0
+        session.close()
+        return {
+            "cibil_score": current_cibil,
+            "avg_risk_score": avg_risk,
+            "risk_distribution": risk_dist,
+            "borrowing_headroom": round(headroom, 2),
+            "totals": {
+                "total_borrowed": round(total_borrowed, 2),
+                "total_outstanding": round(total_outstanding, 2),
+                "total_paid": round(total_paid, 2),
+                "active_loans": len(active),
+                "closed_loans": len(closed),
+                "total_loans": len(loans),
+            },
+            "type_breakdown": type_breakdown,
+            "repayment_progress_pct": progress_pct,
+        }
+    except Exception as e:
+        session.close()
+        return {"error": str(e)}
+
+
 # Indian bank interest rates (based on HDFC/SBI/ICICI 2025-26 rates)
 # base_rate = what an average borrower with 700+ CIBIL gets
 # CIBIL-based slabs adjust this

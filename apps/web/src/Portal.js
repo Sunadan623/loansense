@@ -3,6 +3,7 @@ import axios from "axios";
 import { useNavigate } from "react-router-dom";
 import NotificationBell from "./NotificationBell";
 import AppShell from "./AppShell";
+import Portfolio from "./Portfolio";
 import SupportChat from "./SupportChat";
 const PURPOSE_ICONS = {
   personal: "👤", home: "🏠", car: "🚗",
@@ -195,7 +196,7 @@ export default function Portal() {
           <div className="header-row">
             <div>
               <div className="welcome">Hello, {(user?.name || "there").split(" ")[0]} 👋</div>
-              <div className="welcome-sub">Here's your loan overview</div>
+              <div className="welcome-sub">Here's your portfolio</div>
             </div>
             {loans.length > 0 && (
               <div style={{display: "flex", gap: 10, flexWrap: "wrap"}}>
@@ -211,6 +212,8 @@ export default function Portal() {
               </div>
             )}
           </div>
+
+          {!loading && loans.length > 0 && <Portfolio />}
 
           {loading ? (
             <div className="empty-state">
