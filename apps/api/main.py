@@ -1387,6 +1387,12 @@ def analyst_model_monitoring(current_user: dict = Depends(get_current_user)):
     """ML model health metrics: validation performance, prediction distribution, score-vs-behavior. Analyst-only."""
     if current_user.get("role") != "analyst":
         return {"error": "Not authorized"}
+    from streaming import cache_get, cache_set
+    _cache_key = "analytics:model-monitoring"
+    _cached = cache_get(_cache_key)
+    if _cached is not None:
+        _cached["_cached"] = True
+        return _cached
     session = Session()
     try:
         import numpy as np
@@ -1490,6 +1496,8 @@ def analyst_model_monitoring(current_user: dict = Depends(get_current_user)):
         ]
 
         session.close()
+        cache_set(_cache_key, result, ttl_seconds=120)
+        result['_cached'] = False
         return result
     except Exception as e:
         session.close()
@@ -1500,6 +1508,12 @@ def analyst_portfolio_intelligence(current_user: dict = Depends(get_current_user
     """Real portfolio analytics from loans/payments/ledger. Analyst-only."""
     if current_user.get("role") != "analyst":
         return {"error": "Not authorized"}
+    from streaming import cache_get, cache_set
+    _cache_key = "analytics:portfolio-intelligence"
+    _cached = cache_get(_cache_key)
+    if _cached is not None:
+        _cached["_cached"] = True
+        return _cached
     session = Session()
     try:
         from collections import defaultdict
@@ -1544,7 +1558,7 @@ def analyst_portfolio_intelligence(current_user: dict = Depends(get_current_user
         total_exposure = sum(l.loan_amnt for l in active)
 
         session.close()
-        return {
+        _result = {
             "payment_health": {"full": full_count, "partial": partial_count, "total": len(paid)},
             "collection": {
                 "collected": round(total_collected, 2),
@@ -1560,6 +1574,9 @@ def analyst_portfolio_intelligence(current_user: dict = Depends(get_current_user
             "total_exposure": round(total_exposure, 2),
             "active_loans": len(active),
         }
+        cache_set(_cache_key, _result, ttl_seconds=60)
+        _result["_cached"] = False
+        return _result
     except Exception as e:
         session.close()
         return {"error": str(e)}
@@ -1569,6 +1586,12 @@ def analyst_event_analytics(current_user: dict = Depends(get_current_user)):
     """Behavioral analytics computed from the events table. Analyst-only."""
     if current_user.get("role") != "analyst":
         return {"error": "Not authorized"}
+    from streaming import cache_get, cache_set
+    _cache_key = "analytics:event-analytics"
+    _cached = cache_get(_cache_key)
+    if _cached is not None:
+        _cached["_cached"] = True
+        return _cached
     session = Session()
     try:
         from collections import defaultdict
@@ -1629,7 +1652,7 @@ def analyst_event_analytics(current_user: dict = Depends(get_current_user)):
         } for r in recent]
 
         session.close()
-        return {
+        _result = {
             "event_volume": [{"type": k, "count": v} for k, v in sorted(by_type.items(), key=lambda x: -x[1])],
             "daily_activity": [{"day": k, "count": v} for k, v in daily.items()],
             "funnel": funnel,
@@ -1637,6 +1660,9 @@ def analyst_event_analytics(current_user: dict = Depends(get_current_user)):
             "recent_activity": recent_stream,
             "total_events": len(all_events),
         }
+        cache_set(_cache_key, _result, ttl_seconds=60)
+        _result["_cached"] = False
+        return _result
     except Exception as e:
         session.close()
         return {"error": str(e)}
