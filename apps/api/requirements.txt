@@ -33,3 +33,5 @@ requests==2.32.3
 python-dotenv==1.0.1
 apscheduler==3.10.4
 reportlab==4.2.5
+kafka-python==2.0.2
+redis==5.0.1

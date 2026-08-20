@@ -256,6 +256,16 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def _start_streaming():
+    """Launch the Kafka consumer that ingests events into Postgres."""
+    try:
+        from streaming import start_consumer
+        start_consumer(Session, Event)
+        print("\u2713 Kafka event consumer started")
+    except Exception as e:
+        print(f"\u26a0 Could not start Kafka consumer: {e}")
+
 @app.get("/")
 def root():
     return {
@@ -2662,8 +2672,8 @@ def create_notification(session, user_id, title, message, ntype="info", link=Non
     except Exception as e:
         print(f"Notification failed: {e}")
 
-def log_event(user_id, event_type, event_category=None, loan_id=None, metadata=None, ip_address=None):
-    """Fire-and-forget behavioral event logger. Uses its own session; never breaks the caller."""
+def _write_event_to_db(user_id, event_type, event_category, loan_id, metadata, ip_address):
+    """Direct DB write — used as fallback and by the Kafka consumer."""
     s = Session()
     try:
         ev = Event(
@@ -2677,13 +2687,37 @@ def log_event(user_id, event_type, event_category=None, loan_id=None, metadata=N
         s.add(ev)
         s.commit()
     except Exception as e:
-        print(f"Event log failed ({event_type}): {e}")
+        print(f"Event DB write failed ({event_type}): {e}")
         try:
             s.rollback()
         except Exception:
             pass
     finally:
         s.close()
+
+def log_event(user_id, event_type, event_category=None, loan_id=None, metadata=None, ip_address=None):
+    """Fire-and-forget behavioral event logger.
+    Publishes to Kafka (decoupled ingestion). Falls back to direct DB write if Kafka is down.
+    Never breaks the caller.
+    """
+    event = {
+        "user_id": user_id,
+        "event_type": event_type,
+        "event_category": event_category,
+        "loan_id": loan_id,
+        "metadata": metadata,
+        "ip_address": ip_address,
+        "ts": datetime.utcnow().isoformat(),
+    }
+    try:
+        from streaming import publish_event
+        sent = publish_event(event)
+        if not sent:
+            # Kafka unavailable — write straight to DB so nothing is lost
+            _write_event_to_db(user_id, event_type, event_category, loan_id, metadata, ip_address)
+    except Exception as e:
+        print(f"Event log failed ({event_type}): {e}")
+        _write_event_to_db(user_id, event_type, event_category, loan_id, metadata, ip_address)
 
 def notify_all_analysts(session, title, message, ntype="info", link=None):
     """Send a notification to every analyst user."""
