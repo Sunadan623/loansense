@@ -44,6 +44,8 @@ root.render(
       <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
       <Route path="/signup" element={<PublicRoute><Signup /></PublicRoute>} />
       <Route path="/portal" element={<ProtectedRoute><Portal /></ProtectedRoute>} />
+      <Route path="/active-loans" element={<ProtectedRoute><Portal mode="active" /></ProtectedRoute>} />
+      <Route path="/closed-loans" element={<ProtectedRoute><Portal mode="closed" /></ProtectedRoute>} />
       <Route path="/apply" element={<ProtectedRoute><ApplyLoan /></ProtectedRoute>} />
       <Route path="/loan/:loanId" element={<ProtectedRoute><LoanDetails /></ProtectedRoute>} />
       <Route path="/affordability" element={<ProtectedRoute><AffordabilityCoach /></ProtectedRoute>} />

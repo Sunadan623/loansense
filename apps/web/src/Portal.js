@@ -55,7 +55,7 @@ const styles = `
   .status-msg { flex: 1; text-align: center; padding: 11px; border-radius: 8px; font-size: 13px; font-weight: 600; }
 `;
 
-export default function Portal() {
+export default function Portal({ mode = "home" }) {
   const [user, setUser] = useState(null);
   const [loans, setLoans] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -159,7 +159,12 @@ export default function Portal() {
         const { data } = await axios.get(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/my-loans`, {
           headers: { Authorization: `Bearer ${token}` }
         });
-        if (Array.isArray(data)) setLoans(data);
+        if (Array.isArray(data)) {
+          const filtered = mode === "active" ? data.filter(l => l.status === "active")
+                         : mode === "closed" ? data.filter(l => l.status === "closed")
+                         : [];
+          setLoans(filtered);
+        }
       } catch (err) {
         if (err.response?.status === 401) navigate("/login");
       }
@@ -213,18 +218,18 @@ export default function Portal() {
             )}
           </div>
 
-          {!loading && loans.length > 0 && <Portfolio />}
+          {mode === "home" && <Portfolio />}
 
-          {loading ? (
+          {mode !== "home" && (loading ? (
             <div className="empty-state">
               <div className="empty-title">Loading your loans...</div>
             </div>
           ) : loans.length === 0 ? (
             <div className="empty-state">
-              <div className="empty-icon">💰</div>
-              <div className="empty-title">No loans yet</div>
-              <div className="empty-sub">You don't have any active loans. Apply for one to get started.</div>
-              <button className="btn-primary" onClick={() => navigate("/apply")}>Apply for a loan</button>
+              <div className="empty-icon">{mode === "closed" ? "✅" : "💰"}</div>
+              <div className="empty-title">{mode === "closed" ? "No closed loans yet" : "No active loans"}</div>
+              <div className="empty-sub">{mode === "closed" ? "Loans you fully pay off or foreclose will appear here." : "Apply for a loan to get started."}</div>
+              {mode !== "closed" && <button className="btn-primary" onClick={() => navigate("/apply")}>Apply for a loan</button>}
             </div>
           ) : (
             loans.map(l => {
@@ -301,7 +306,7 @@ export default function Portal() {
                 </div>
               );
             })
-          )}
+          ))}
         </div>
         {smartModal && (
           <div style={{

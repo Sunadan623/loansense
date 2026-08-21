@@ -63,7 +63,8 @@ const shellStyles = `
 
 const BORROWER_NAV = [
   { label: "Home", icon: "🏠", path: "/portal" },
-  { label: "My Loans", icon: "💳", path: "/portal#loans" },
+  { label: "Active Loans", icon: "💳", path: "/active-loans" },
+  { label: "Closed Loans", icon: "✅", path: "/closed-loans" },
   { label: "Upcoming EMIs", icon: "📅", path: "/upcoming" },
   { label: "Transactions", icon: "📒", path: "/transactions" },
   { label: "Affordability", icon: "💡", path: "/affordability" },
