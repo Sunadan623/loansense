@@ -11,9 +11,38 @@ import threading
 import time
 from datetime import datetime
 
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
+def _env(key, default=None):
+    """Read env var; fall back to parsing .env directly if empty (robust against shadowing)."""
+    val = os.getenv(key)
+    if val:
+        return val
+    try:
+        from dotenv import dotenv_values
+        for path in (".env", "../.env", "../../.env"):
+            if os.path.exists(path):
+                v = dotenv_values(path).get(key)
+                if v:
+                    return v
+    except Exception:
+        pass
+    return default
+
+KAFKA_BROKER = _env("KAFKA_BROKER", "localhost:9092")
+KAFKA_API_KEY = _env("KAFKA_API_KEY")        # set for Confluent Cloud
+KAFKA_API_SECRET = _env("KAFKA_API_SECRET")  # set for Confluent Cloud
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 EVENTS_TOPIC = "loansense-events"
+
+def _kafka_auth_config():
+    """Return SASL_SSL auth kwargs if Confluent creds are set, else empty (local plaintext)."""
+    if KAFKA_API_KEY and KAFKA_API_SECRET:
+        return {
+            "security_protocol": "SASL_SSL",
+            "sasl_mechanism": "PLAIN",
+            "sasl_plain_username": KAFKA_API_KEY,
+            "sasl_plain_password": KAFKA_API_SECRET,
+        }
+    return {}
 
 # ---------------- Kafka Producer ----------------
 _producer = None
@@ -28,8 +57,9 @@ def get_producer():
             bootstrap_servers=KAFKA_BROKER,
             value_serializer=lambda v: json.dumps(v).encode("utf-8"),
             retries=2,
-            request_timeout_ms=3000,
-            max_block_ms=3000,
+            request_timeout_ms=10000,
+            max_block_ms=10000,
+            **_kafka_auth_config(),
         )
         print(f"✓ Kafka producer connected to {KAFKA_BROKER}")
     except Exception as e:
@@ -76,6 +106,7 @@ def start_consumer(session_factory, event_model):
                     auto_offset_reset="earliest",
                     enable_auto_commit=True,
                     consumer_timeout_ms=1000,
+                    **_kafka_auth_config(),
                 )
                 print(f"✓ Kafka consumer connected (group loansense-event-ingest)")
                 break
@@ -129,7 +160,8 @@ def get_redis():
         import redis as redis_lib
         _redis = redis_lib.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=2)
         _redis.ping()
-        print(f"✓ Redis connected to {REDIS_URL}")
+        _host = REDIS_URL.split("@")[-1] if "@" in REDIS_URL else REDIS_URL
+        print(f"✓ Redis connected to {_host}")
     except Exception as e:
         print(f"⚠ Redis unavailable: {e}")
         _redis = None
